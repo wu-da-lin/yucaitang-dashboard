@@ -1348,16 +1348,12 @@ document.getElementById('copyCatModal').addEventListener('click', function(e) {
   <div class="modal" style="max-width:920px">
     <h3>停机原因归类设置</h3>
     <p>左侧管理分类，右侧将每条停机原因分配到对应分类。标记为"排除"的原因不会出现在分析图表中。所有设置自动保存在浏览器本地。</p>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px 12px;background:#f5f7fa;border-radius:6px;border:1px solid #e0e8ed;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;padding:8px 12px;background:#f5f7fa;border-radius:6px;border:1px solid #e0e8ed">
       <span class="filter-label">分配范围：</span>
       <select id="catLineScope" onchange="onCatLineScopeChange()" style="font-size:12px;padding:4px 8px">
       </select>
-      <span class="filter-label" title="按班次日期（YYYY-MM）划分：每月一份独立分类与归类映射；「全月份（兑底）」对所有月份生效">分配月份：</span>
-      <select id="catMonthScope" onchange="onCatMonthScopeChange()" style="font-size:12px;padding:4px 8px">
-      </select>
       <span id="catScopeHint" style="font-size:11px;color:#888;flex:1"></span>
       <button class="btn btn-secondary" style="font-size:10px;padding:3px 8px" onclick="openCopyCategoriesModal()" title="把其他产线的分类复制到当前产线（同名不覆盖）">📋 从其他产线复制</button>
-      <button class="btn btn-secondary" style="font-size:10px;padding:3px 8px" onclick="openCopyMonthModal()" title="把其他月份的分类复制到当前月份（同名不覆盖）">📅 从其他月份复制</button>
       <button class="btn btn-secondary" style="font-size:10px;padding:3px 8px" onclick="refreshCatLines()">刷新线列表</button>
     </div>
     <!-- 🆕 日期范围筛选：用户可只对近期数据分类，避免 7 月前历史数据干扰 -->
@@ -1435,6 +1431,7 @@ document.getElementById('copyCatModal').addEventListener('click', function(e) {
       <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="document.getElementById('catImportInput').click()">导入归类JSON</button>
       <input type="file" id="catImportInput" accept=".json" style="display:none" onchange="importCategoryJSON(event)">
       <span style="flex:1;font-size:11px;color:#8a9bb0">导出/导入用于跨浏览器同步归类模板</span>
+      <button class="btn btn-reset" style="font-size:11px;padding:4px 10px;border-color:#fca5a5;color:#dc2626" onclick="resetAllCatsAndMaps()" title="清空所有产线的分类定义与归类映射（清空前自动备份到 localStorage，恢复方法见控制台）">🔄 重置分类</button>
       <button class="btn btn-secondary" onclick="hideCategoryModal()">取消</button>
       <button class="btn" onclick="saveCategorySettings()">保存并应用</button>
     </div>
@@ -1519,6 +1516,7 @@ document.getElementById('copyCatModal').addEventListener('click', function(e) {
       <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="document.getElementById('catImportInput').click()">导入归类JSON</button>
       <input type="file" id="catImportInput" accept=".json" style="display:none" onchange="importCategoryJSON(event)">
       <span style="flex:1;font-size:11px;color:#8a9bb0">导出/导入用于跨浏览器同步归类模板</span>
+      <button class="btn btn-reset" style="font-size:11px;padding:4px 10px;border-color:#fca5a5;color:#dc2626" onclick="resetAllCatsAndMaps()" title="清空所有产线的分类定义与归类映射（清空前自动备份到 localStorage，恢复方法见控制台）">🔄 重置分类</button>
       <button class="btn btn-secondary" onclick="hideCategoryModal()">取消</button>
       <button class="btn" onclick="saveCategorySettings()">保存并应用</button>
     </div>
@@ -2015,48 +2013,22 @@ var DT_CATEGORIES = { __ALL__: [] };
 var CAT_MAP = { __ALL__: {} };
 
 // 辅助函数：按产线隔离的 getter/setter（line=null 时退回 __ALL__）
-// 🆕 2026-08-30 month 参数：'all' / 未指定 → 读写 V3 主存（兜底，跨月份共享）；
-//   指定 'YYYY-MM' → 读写 BY_MONTH[line][month]（独立月份，不回退兜底 → 用户可在新月份「完全空白」从零开始）。
 function _lineKey(line) { return line || '__ALL__'; }
-function getLineCats(line, month) {
+function getLineCats(line) {
   var k = _lineKey(line);
-  var m = month || catMonthScope || 'all';
-  // 选具体月份时：严格只读 BY_MONTH（不回退兜底 → 让用户能"完全空白"新月份）
-  if (m !== 'all') {
-    // 🆕 FIX 2026-08-30：必须主动建容器再返回引用，否则 push 写不到 BY_MONTH
-    if (!DT_CATEGORIES_BY_MONTH[k]) DT_CATEGORIES_BY_MONTH[k] = {};
-    if (!DT_CATEGORIES_BY_MONTH[k][m]) DT_CATEGORIES_BY_MONTH[k][m] = [];
-    return DT_CATEGORIES_BY_MONTH[k][m];
-  }
   if (!DT_CATEGORIES[k]) DT_CATEGORIES[k] = [];
   return DT_CATEGORIES[k];
 }
-function setLineCats(line, arr, month) {
-  var k = _lineKey(line);
-  var m = month || catMonthScope || 'all';
-  if (m === 'all') { DT_CATEGORIES[k] = arr || []; return; }
-  if (!DT_CATEGORIES_BY_MONTH[k]) DT_CATEGORIES_BY_MONTH[k] = {};
-  DT_CATEGORIES_BY_MONTH[k][m] = arr || [];
+function setLineCats(line, arr) {
+  DT_CATEGORIES[_lineKey(line)] = arr || [];
 }
-function getLineMap(line, month) {
+function getLineMap(line) {
   var k = _lineKey(line);
-  var m = month || catMonthScope || 'all';
-  // 🆕 月份模式下：读 BY_MONTH（不存在 → 空对象，让"未归类"自然走默认）
-  if (m !== 'all') {
-    // 🆕 FIX 2026-08-30：必须主动建容器再返回引用，否则 setLineMap 写不到 BY_MONTH
-    if (!CAT_MAP_BY_MONTH[k]) CAT_MAP_BY_MONTH[k] = {};
-    if (!CAT_MAP_BY_MONTH[k][m]) CAT_MAP_BY_MONTH[k][m] = {};
-    return CAT_MAP_BY_MONTH[k][m];
-  }
   if (!CAT_MAP[k]) CAT_MAP[k] = {};
   return CAT_MAP[k];
 }
-function setLineMap(line, m, month) {
-  var k = _lineKey(line);
-  var mm = month || catMonthScope || 'all';
-  if (mm === 'all') { CAT_MAP[k] = m || {}; return; }
-  if (!CAT_MAP_BY_MONTH[k]) CAT_MAP_BY_MONTH[k] = {};
-  CAT_MAP_BY_MONTH[k][mm] = m || {};
+function setLineMap(line, m) {
+  CAT_MAP[_lineKey(line)] = m || {};
 }
 function ensureLine(line) {
   var k = _lineKey(line);
@@ -2064,27 +2036,9 @@ function ensureLine(line) {
   if (!CAT_MAP[k]) CAT_MAP[k] = {};
 }
 // 检查分类名是否在指定产线（默认当前 catLineScope）下存在
-// 🆕 FIX 2026-08-30：同时扫 BY_MONTH（指定月份/全部月份）和 V3 兜底，避免「全月份叫X，8月又新建X」同名混淆
 function catNameExists(name, line) {
-  var k = _lineKey(line);
-  // 1) 当前月份（catMonthScope）下
-  var catsNow = getLineCats(line);
-  if (catsNow.some(function(c) { return c.name === name; })) return true;
-  // 2) V3 兜底（'all' 或月份模式回退）
-  var catsAll = (DT_CATEGORIES[k] || []);
-  if (catsAll.some(function(c) { return c.name === name; })) return true;
-  // 3) 其他月份 BY_MONTH 中（用户可能在 8 月下加，要避免和 9 月下重名导致泄露）
-  try {
-    if (DT_CATEGORIES_BY_MONTH[k]) {
-      var monthKeys = Object.keys(DT_CATEGORIES_BY_MONTH[k]);
-      for (var i = 0; i < monthKeys.length; i++) {
-        var ym = monthKeys[i];
-        var arr = DT_CATEGORIES_BY_MONTH[k][ym] || [];
-        if (ym !== catMonthScope && arr.some(function(c) { return c.name === name; })) return true;
-      }
-    }
-  } catch(e) {}
-  return false;
+  var cats = getLineCats(line);
+  return cats.some(function(c) { return c.name === name; });
 }
 // 取某产线下"未分类"含义：reason 不在 CAT_MAP 里（包括 __EXCLUDE__ 也不算分类）
 function getReasonCat(reason, line) {
@@ -2232,23 +2186,6 @@ function loadCategories() {
         if (Array.isArray(pd)) SHIFT_DATE_FILTER = pd;
       } catch(e) {}
     }
-    // 🆕 2026-08-30 按月分类隔离加载
-    var cm = localStorage.getItem('catMonthScope');
-    if (cm) {
-      try { var pcm = JSON.parse(cm); if (typeof pcm === 'string') catMonthScope = pcm; } catch(em1) {}
-    }
-    var dcm = localStorage.getItem('DT_CATEGORIES_BY_MONTH');
-    if (dcm) {
-      try { var pdcm = JSON.parse(dcm); if (pdcm && typeof pdcm === 'object' && !Array.isArray(pdcm)) DT_CATEGORIES_BY_MONTH = pdcm; } catch(em2) {}
-    }
-    var mcm = localStorage.getItem('CAT_MAP_BY_MONTH');
-    if (mcm) {
-      try { var pmcm = JSON.parse(mcm); if (pmcm && typeof pmcm === 'object' && !Array.isArray(pmcm)) CAT_MAP_BY_MONTH = pmcm; } catch(em3) {}
-    }
-    var pcm = localStorage.getItem('DT_PINNED_BY_MONTH');
-    if (pcm) {
-      try { var ppcm = JSON.parse(pcm); if (ppcm && typeof ppcm === 'object' && !Array.isArray(ppcm)) DT_PINNED_BY_MONTH = ppcm; } catch(em4) {}
-    }
   } catch(e) { console.warn('Load categories failed:', e); }
   // 🆕 V3 默认分类（按产线隔离版本）
   if (!DT_CATEGORIES.__ALL__ || DT_CATEGORIES.__ALL__.length === 0) {
@@ -2269,13 +2206,6 @@ function saveCategories() {
     // 🆕 V3 主键（按产线隔离）
     localStorage.setItem('DT_CATEGORIES_V3', JSON.stringify(DT_CATEGORIES));
     localStorage.setItem('CAT_MAP_V3', JSON.stringify(CAT_MAP));
-    // 🆕 2026-08-30 按月分类隔离持久化
-    try {
-      localStorage.setItem('DT_CATEGORIES_BY_MONTH', JSON.stringify(DT_CATEGORIES_BY_MONTH));
-      localStorage.setItem('CAT_MAP_BY_MONTH', JSON.stringify(CAT_MAP_BY_MONTH));
-      localStorage.setItem('DT_PINNED_BY_MONTH', JSON.stringify(DT_PINNED_BY_MONTH));
-      localStorage.setItem('catMonthScope', JSON.stringify(catMonthScope));
-    } catch(em) {}
     // 旧 V2 键同步保存（仅 __ALL__ 部分，供导出/兼容）
     try {
       localStorage.setItem('DT_CATEGORIES', JSON.stringify(DT_CATEGORIES.__ALL__ || []));
@@ -2782,42 +2712,31 @@ function splitReasonKey(key) {
 }
 
 // 兼容旧数据：lineMap[reason] 可能是单值字符串或数组。status 不为空时优先读精细维，回退到旧维。
-// 🆕 2026-08-30 加 month 参数：lineMap 按月覆盖（BY_MONTH 优先于 line 兑底）
-function getCategoriesForReason(reason, line, status, month) {
+function getCategoriesForReason(reason, line, status) {
   if (!reason) return [];
   var r = String(reason).trim();
   var target = line || (typeof currentLine !== 'undefined' ? currentLine : '') || '__ALL__';
-  var m = month || (typeof catMonthScope !== 'undefined' ? catMonthScope : 'all');
-  function rawFor(ln, key, mm) {
-    var mp = getLineMap(ln, mm);
-    return (mp && mp[key] !== undefined) ? mp[key] : null;
+  function rawFor(ln, key) {
+    var m = getLineMap(ln);
+    return (m && m[key] !== undefined) ? m[key] : null;
   }
   var lookupKeys = [];
   if (status) {
     lookupKeys.push(reasonKey(r, status)); // 优先：精细维（指定 status）
   }
   lookupKeys.push(r); // 回退：旧维（跨 status 生效）
-  // 🆕 2026-08-30：BY_MONTH 找不到时回退 V3（'all' 桶）兜底，让"全月份(兜底 V3 兼容)"分类在所有月份图表里都能看到。
-  // 查找顺序：line-本月 → line-all → __ALL__-本月 → __ALL__-all。BY_MONTH 优先（精确覆盖），V3 兜底。
-  function tryLookup(ln) {
-    for (var i = 0; i < lookupKeys.length; i++) {
-      var v = rawFor(ln, lookupKeys[i], m);
-      if (v !== null) return v;
-    }
-    if (m !== 'all') {
-      for (var j = 0; j < lookupKeys.length; j++) {
-        var v2 = rawFor(ln, lookupKeys[j], 'all');
-        if (v2 !== null) return v2;
-      }
-    }
-    return null;
-  }
   var raw = null;
   if (target && target !== '__ALL__') {
-    raw = tryLookup(target);
+    for (var i = 0; i < lookupKeys.length; i++) {
+      raw = rawFor(target, lookupKeys[i]);
+      if (raw !== null) break;
+    }
   }
   if (raw === null) {
-    raw = tryLookup('__ALL__');
+    for (var j = 0; j < lookupKeys.length; j++) {
+      raw = rawFor('__ALL__', lookupKeys[j]);
+      if (raw !== null) break;
+    }
   }
   if (raw === null) return [];
   if (raw === '__EXCLUDE__') return [];
@@ -6467,9 +6386,7 @@ function renderDowntime() {
     if (isExcludedReason(reason, r.line)) return;
     var st = (r.status || '').trim() || '其他';
     var key = reasonKey(reason, st);
-    // 🆕 2026-08-30 按月分类隔离：按 record 的班次日期所属月份取归类（与归类面板按月保存一致）
-    var mon = (r.sd || '').substring(0, 7);
-    if (!reasons[key]) reasons[key] = { reason: reason, status: st, count: 0, totalMin: 0, cats: getCategoriesForReason(reason, r.line, st, mon) };
+    if (!reasons[key]) reasons[key] = { reason: reason, status: st, count: 0, totalMin: 0, cats: getCategoriesForReason(reason, r.line, st) };
     reasons[key].count++;
     reasons[key].totalMin += effMin(r);
   });
@@ -6925,7 +6842,6 @@ var catLineScope = null; // null means currentLine
 function showCategoryEditor() {
   document.getElementById('categoryModal').classList.add('active');
   initCatLineScope();
-  initCatMonthScope(); // 🆕 2026-08-30 月份下拉（默认 = 最新月份）
   initCatDateUI(); // 🆕 同步日期范围 UI（默认 2026-07+）
   renderCategoryList();
   renderReasonList();
@@ -6933,6 +6849,86 @@ function showCategoryEditor() {
 
 function hideCategoryModal() {
   document.getElementById('categoryModal').classList.remove('active');
+}
+
+// 🆕 2026-08-30 完全重置归类（清空 CAT_MAP_V3 + DT_CATEGORIES_V3，保留 EXCLUDE_RULES_V2）
+function resetAllCatsAndMaps() {
+  // 1) 统计现状
+  var catMapStr = localStorage.getItem('CAT_MAP_V3') || '{}';
+  var catListStr = localStorage.getItem('DT_CATEGORIES_V3') || '{}';
+  var catMap = {}; try { catMap = JSON.parse(catMapStr); } catch (e) {}
+  var catList = {}; try { catList = JSON.parse(catListStr); } catch (e) {}
+  var totalMappings = 0;
+  Object.keys(catMap).forEach(function(line) {
+    var m = catMap[line] || {};
+    Object.keys(m).forEach(function(k) { totalMappings++; });
+  });
+  var totalCats = 0;
+  Object.keys(catList).forEach(function(line) {
+    var arr = catList[line] || [];
+    totalCats += arr.length;
+  });
+  var lines = Object.keys(catMap).concat(Object.keys(catList)).filter(function(v, i, a) { return a.indexOf(v) === i; });
+  if (lines.length === 0 && totalMappings === 0 && totalCats === 0) {
+    alert('当前没有归类数据需要清空。');
+    return;
+  }
+  var hint = '将清空「我的分类」+' + totalMappings + ' 条归类映射（共 ' + lines.length + ' 个产线/公共）。\n\n'
+    + '⚠️ 这会同时删除所有产线的分类定义（如「开班准备」「休息时段」这些分类名也会一起删），重置后需要从零重新手工分类。\n\n'
+    + '• EXCLUDE_RULES_V2（排除规则）会保留不动；\n'
+    + '• 清空前自动备份到 localStorage.PRE_RESET_CATS_BACKUP；\n'
+    + '• 万一清错，控制台执行 restoreLastCatsResetBackup() 可恢复。\n\n'
+    + '确定要全部清空吗？';
+  if (!confirm(hint)) return;
+
+  // 2) 备份
+  var backup = {
+    ts: new Date().toISOString(),
+    catMap: catMapStr,
+    catList: catListStr
+  };
+  localStorage.setItem('PRE_RESET_CATS_BACKUP', JSON.stringify(backup));
+
+  // 3) 清空
+  localStorage.removeItem('CAT_MAP_V3');
+  localStorage.removeItem('DT_CATEGORIES_V3');
+
+  // 4) 重新载入内存变量
+  try {
+    if (typeof CAT_MAP !== 'undefined') {
+      Object.keys(CAT_MAP).forEach(function(k) { delete CAT_MAP[k]; });
+      Object.keys(catMap).forEach(function(line) {
+        CAT_MAP[line] = {};
+      });
+    }
+    if (typeof DT_CATEGORIES !== 'undefined') {
+      Object.keys(DT_CATEGORIES).forEach(function(k) { delete DT_CATEGORIES[k]; });
+    }
+  } catch (e) { /* ignore */ }
+
+  // 5) 刷新面板 + 重渲染图表
+  try { renderCategoryList(); } catch (e) {}
+  try { renderReasonList(); } catch (e) {}
+  try { refreshAllCharts(); } catch (e) {}
+  try { renderDowntime(); } catch (e) {}
+
+  alert('✅ 已清空 ' + totalCats + ' 个分类 / ' + totalMappings + ' 条归类映射\n\n'
+    + '备份已保存在 localStorage「PRE_RESET_CATS_BACKUP」。\n'
+    + '如果清错了，恢复方法：F12 控制台执行 restoreLastCatsResetBackup()。');
+}
+
+// 🆕 恢复最近一次「重置分类」的备份
+function restoreLastCatsResetBackup() {
+  var raw = localStorage.getItem('PRE_RESET_CATS_BACKUP');
+  if (!raw) {
+    alert('❌ 没有找到 PRE_RESET_CATS_BACKUP 备份。');
+    return;
+  }
+  var b; try { b = JSON.parse(raw); } catch (e) { alert('备份格式错误'); return; }
+  if (!confirm('将恢复 ' + (b.ts || '') + ' 的分类数据。确定？')) return;
+  if (b.catMap) localStorage.setItem('CAT_MAP_V3', b.catMap);
+  if (b.catList) localStorage.setItem('DT_CATEGORIES_V3', b.catList);
+  location.reload();
 }
 
 function initCatLineScope() {
@@ -6962,164 +6958,6 @@ function onCatLineScopeChange() {
   catCurrentPage = 1;
   renderCategoryList();
   renderReasonList();
-}
-
-// 🆕 2026-08-30 按月分类隔离：渲染月份下拉选项
-function initCatMonthScope() {
-  var sel = document.getElementById('catMonthScope');
-  if (!sel) return;
-  // 从 RAW_DATA 提取所有月份（YYYY-MM），按出现顺序排重
-  var months = {};
-  try {
-    (typeof RAW_DATA !== 'undefined' ? RAW_DATA : []).forEach(function(r) {
-      var sd = r.sd || r.date || '';
-      var ym = sd.substring(0, 7);
-      if (ym && /^\d{4}-\d{2}$/.test(ym)) months[ym] = (months[ym] || 0) + 1;
-    });
-  } catch(e) {}
-  var keys = Object.keys(months).sort();
-  // 默认 = 当前数据中最新月份
-  if (!catMonthScope || catMonthScope === 'all' || !months.hasOwnProperty(catMonthScope)) {
-    catMonthScope = keys.length ? keys[keys.length - 1] : 'all';
-  }
-  var html = '<option value="all">📦 全月份（兑底 V3 兼容）</option>';
-  keys.forEach(function(ym) {
-    var sel2 = (ym === catMonthScope) ? ' selected' : '';
-    html += '<option value="' + ym + '"' + sel2 + '>' + ym + ' (' + months[ym] + ' 条)</option>';
-  });
-  if (!keys.length) html += '<option value="all">（无月份数据）</option>';
-  sel.innerHTML = html;
-  updateCatMonthHint();
-}
-
-function onCatMonthScopeChange() {
-  var v = document.getElementById('catMonthScope').value || 'all';
-  catMonthScope = v;
-  try { saveCategories(); } catch(e) {}
-  updateCatMonthHint();
-  // 切换月份 → 重置分页 + 重新渲染左右面板
-  catCurrentPage = 1;
-  renderCategoryList();
-  renderReasonList();
-}
-
-function updateCatMonthHint() {
-  var hint = document.getElementById('catScopeHint');
-  if (!hint) return;
-  var editorLine = catLineScope || '__ALL__';
-  var lineText = (catLineScope === '__ALL__' || !catLineScope) ? '公共' : catLineScope;
-  var v3Cats = (function() { try { return getLineCats(editorLine, 'all') || []; } catch(e) { return []; } })();
-  var v3Names = v3Cats.map(function(c) { return c.name; });
-  var v3MapN = 0;
-  try {
-    var mp = (typeof CAT_MAP !== 'undefined' && CAT_MAP) ? (CAT_MAP[editorLine] || {}) : {};
-    v3MapN = Object.keys(mp).length;
-  } catch(e) { v3MapN = 0; }
-  function tag(s, bg, bd) {
-    return '<span style="background:' + bg + ';border:1px solid ' + bd + ';padding:1px 6px;border-radius:4px;font-size:10.5px;margin:0 2px;display:inline-block">' + escapeHtml(s) + '</span>';
-  }
-  var v3Tags = v3Names.length
-    ? v3Names.map(function(n) { return tag(n, '#f0f9ff', '#bae6fd'); }).join('')
-    : '<span style="color:#9ca3af;font-size:10.5px">（无）</span>';
-  if (catMonthScope === 'all') {
-    var txt = '🌐 <b>' + lineText + '</b> · <b>全月份</b>（V3 兜底，对所有月份生效）';
-    if (v3Names.length) {
-      txt += '<br>📊 通用分类 (' + v3Names.length + ')：' + v3Tags;
-      txt += '<br><span style="color:#0369a1;font-size:10.5px">💡 每月都有的原因归这里；切换到具体月份添加专属分类</span>';
-    }
-    if (v3MapN > 0) {
-      txt += '<br>📋 <b>V3 兜底归类映射</b>：<b>' + v3MapN + '</b> 条历史归类（影响停机分析图表显示）；<a href="javascript:void(0)" onclick="previewAndClearLineMapV3()" style="color:#dc2626;text-decoration:underline">🗑 清空（自动备份）</a>';
-    } else {
-      txt += '<br>📋 V3 兜底归类映射：<b style="color:#16a34a">已清空（从零开始）</b>';
-    }
-    hint.innerHTML = txt;
-  } else {
-    var monCats = (function() { try { return getLineCats(editorLine, catMonthScope) || []; } catch(e) { return []; } })();
-    var monNames = monCats.map(function(c) { return c.name; });
-    var parts = ['🏭 <b>' + lineText + '</b> · 📅 <b>' + catMonthScope + '</b>（仅该月份独立分类）'];
-    if (monNames.length) {
-      parts.push('📅 本月专属 (' + monNames.length + ')：' + monNames.map(function(n){return tag(n, '#ecfdf5', '#6ee7b7');}).join(''));
-    } else {
-      parts.push('<span style="color:#c0392b;font-size:10.5px">⚠️ 本月 BY_MONTH 暂无专属分类</span>');
-    }
-    if (v3Names.length) {
-      parts.push('🌐 V3 通用分类 (' + v3Names.length + '，默认兜底)：' + v3Tags);
-      var sample = v3Names.slice(0, 3).join('、') + (v3Names.length > 3 ? ' 等' : '');
-      parts.push('<span style="color:#0369a1;font-size:10.5px">💡 通用→V3，特殊→本月。停机分析里看到「' + escapeHtml(sample) + '」分类即来自此处</span>');
-    }
-    if (v3MapN > 0) {
-      parts.push('📋 V3 ' + catMonthScope + ' 看不到的归类映射：<b>' + v3MapN + '</b> 条（V3 跨月份兜底），<a href="javascript:void(0)" onclick="previewAndClearLineMapV3()" style="color:#dc2626;text-decoration:underline">🗑 清空 V3 兜底</a> 让图表完全只显示本月归类');
-    }
-    hint.innerHTML = parts.join('<br>');
-  }
-  hint.style.display = 'block';
-  hint.style.lineHeight = '1.55';
-}
-
-function openCopyMonthModal() {
-  // 🆕 2026-08-30：弹简单 prompt 选择源月份；复制 cats（不复制 mappings，避免误覆盖）
-  if (catMonthScope === 'all') {
-    showToast('warning', '请先选具体月份', '切到具体月份后再复制模板。当前在「全月份」模式。', null, null, 2500);
-    return;
-  }
-  // 从 RAW_DATA / BY_MONTH 提取可选源月份（已有分类的优先）
-  var srcSet = {};
-  try {
-    Object.keys(DT_CATEGORIES_BY_MONTH || {}).forEach(function(ln) {
-      Object.keys(DT_CATEGORIES_BY_MONTH[ln] || {}).forEach(function(ym) {
-        if (ym !== catMonthScope && (DT_CATEGORIES_BY_MONTH[ln][ym] || []).length) srcSet[ym] = (DT_CATEGORIES_BY_MONTH[ln][ym] || []).length;
-      });
-    });
-  } catch(e) {}
-  var months = Object.keys(srcSet).sort();
-  if (!months.length) {
-    var md = {};
-    try {
-      (typeof RAW_DATA !== 'undefined' ? RAW_DATA : []).forEach(function(r) {
-        var sd = r.sd || '';
-        var ym = sd.substring(0, 7);
-        if (ym && /^\d{4}-\d{2}$/.test(ym) && ym !== catMonthScope) md[ym] = true;
-      });
-    } catch(e) {}
-    months = Object.keys(md).sort();
-  }
-  if (!months.length) { showToast('info', '暂无可复制源', '请先在别的月份建一些分类', null, null, 2500); return; }
-  var src = window.prompt('请输入源月份 YYYY-MM（可复制：' + months.join(', ') + '）', months[months.length - 1] || '');
-  if (!src) return;
-  if (!/^\d{4}-\d{2}$/.test(src)) { showToast('error', '格式错误', '请输入 YYYY-MM 格式的月份', null, null, 2500); return; }
-  var n = copyCategoriesFromMonth(src, catMonthScope);
-  if (n > 0) {
-    showToast('success', '✅ 月份分类复制完成', '从 ' + src + ' 复制了 ' + n + ' 个分类到【' + catMonthScope + '】', null, null, 3000);
-  } else {
-    showToast('info', '未复制', src + ' 没有可复制的分类或当前月份已包含', null, null, 2500);
-  }
-  renderCategoryList();
-}
-// 占位实现：直接把所选月份分类复制到当前月份的 cats（不复制映射）
-function copyCategoriesFromMonth(srcMonth, dstMonth) {
-  srcMonth = srcMonth || '';
-  dstMonth = dstMonth || catMonthScope || 'all';
-  if (!srcMonth || srcMonth === dstMonth) return 0;
-  if (dstMonth === 'all') return 0;
-  var srcCats = (DT_CATEGORIES_BY_MONTH[catLineScope || '__ALL__'] && DT_CATEGORIES_BY_MONTH[catLineScope || '__ALL__'][srcMonth])
-    || ((DT_CATEGORIES_BY_MONTH['__ALL__'] || {})[srcMonth])
-    || [];
-  var key = catLineScope || '__ALL__';
-  if (!DT_CATEGORIES_BY_MONTH[key]) DT_CATEGORIES_BY_MONTH[key] = {};
-  if (!DT_CATEGORIES_BY_MONTH[key][dstMonth]) DT_CATEGORIES_BY_MONTH[key][dstMonth] = [];
-  var dstCats = DT_CATEGORIES_BY_MONTH[key][dstMonth];
-  var existing = {};
-  dstCats.forEach(function(c) { existing[c.name] = true; });
-  var colors = ['#ef4444', '#f59e0b', '#3b82f6', '#a78bfa', '#ec4899', '#14b8a6', '#fbbf24', '#6b7280'];
-  var added = 0;
-  srcCats.forEach(function(c) {
-    if (!existing[c.name]) {
-      dstCats.push({ name: c.name, color: c.color || colors[dstCats.length % colors.length] });
-      added++;
-    }
-  });
-  if (added > 0) saveCategories();
-  return added;
 }
 
 // 🆕 日期范围预设：all / month / 30d / 7d / jul（2026-07+） / custom
@@ -7172,73 +7010,20 @@ function initCatDateUI() {
 
 function refreshCatLines() {
   initCatLineScope();
-  initCatMonthScope();
 }
 
-// 🆕 2026-08-30：列出 V3 'all' 桶（CAT_MAP[line]）里所有归类映射，给用户提供可视化和清空入口
-// 仅作用于 CAT_MAP[line]（V3 跨月份共享兜底）；DT_CATEGORIES[line] 分类名列表不受影响
-function previewAndClearLineMapV3() {
-  var line = catLineScope || '__ALL__';
-  var mp = CAT_MAP[line] || {};
-  var entries = Object.keys(mp);
-  if (!entries.length) {
-    alert('当前产线（' + line + '）V3 全月份归类映射已为空，无需清理。');
-    return;
-  }
-  var byCat = {};
-  entries.forEach(function(k) {
-    var v = mp[k];
-    if (Array.isArray(v)) {
-      v.forEach(function(c) { byCat[c] = (byCat[c] || 0) + 1; });
-    } else if (typeof v === 'string') {
-      byCat[v] = (byCat[v] || 0) + 1;
-    }
-  });
-  var preview = '⚠️ 当前 ' + line + ' 在 V3 全月份归类映射里有 <b>' + entries.length + '</b> 条记录，分布：\n\n';
-  Object.keys(byCat).sort().forEach(function(c) {
-    preview += '  • ' + c + '：' + byCat[c] + ' 条\n';
-  });
-  preview += '\n清空后：\n  • 这 ' + entries.length + ' 条归类映射会被删除（被归类的子项回到"未分类"）\n  • 分类名称列表（DT_CATEGORIES[' + line + ']）保留不动\n  • 清空前会自动备份到 localStorage.DT_CATMAP_BACKUPS，可恢复\n\n确认清空？';
-  if (!confirm(preview)) return;
-  try {
-    var prev = [];
-    try { prev = JSON.parse(localStorage.getItem('DT_CATMAP_BACKUPS') || '[]'); } catch(eb){}
-    prev.push({ ts: new Date().toISOString(), line: line, map: mp });
-    localStorage.setItem('DT_CATMAP_BACKUPS', JSON.stringify(prev));
-  } catch(eb) { console.warn('备份 V3 归类映射失败:', eb); }
-  CAT_MAP[line] = {};
-  saveCategories();
-  renderCategoryList();
-  renderReasonList();
-  updateCatMonthHint();
-  alert('✅ 已清空 ' + line + ' 的 ' + entries.length + ' 条 V3 全月份归类映射。\n备份已存入 localStorage.DT_CATMAP_BACKUPS，可在控制台用 JSON.parse(localStorage.getItem("DT_CATMAP_BACKUPS")) 查看/恢复。');
-}
-
-// 🆕 2026-08-30：恢复最近一次的 V3 兜底归类映射（从 DT_CATMAP_BACKUPS 取最后一条）
-function restoreLatestLineMapBackup() {
-  try {
-    var prev = JSON.parse(localStorage.getItem('DT_CATMAP_BACKUPS') || '[]');
-    if (!Array.isArray(prev) || prev.length === 0) {
-      alert('没有可恢复的 V3 归类映射备份。');
-      return;
-    }
-    var last = prev[prev.length - 1];
-    if (!confirm('要恢复 ' + last.line + ' 在 ' + last.ts + ' 备份的 ' + Object.keys(last.map || {}).length + ' 条 V3 归类映射？\n（恢复后追加到当前 CAT_MAP 同 key，冲突会被覆盖）')) return;
-    if (!CAT_MAP[last.line]) CAT_MAP[last.line] = {};
-    Object.keys(last.map || {}).forEach(function(k) { CAT_MAP[last.line][k] = last.map[k]; });
-    saveCategories();
-    renderCategoryList();
-    renderReasonList();
-    updateCatMonthHint();
-    alert('✅ 已恢复 ' + last.line + ' 的 ' + Object.keys(last.map || {}).length + ' 条 V3 归类映射。');
-  } catch(e) {
-    alert('恢复失败：' + e.message);
-  }
-}
-
-// 🆕 2026-08-30：保留旧函数（被 onCatLineScopeChange 调用），同时显示月份与产线信息
 function updateCatScopeHint() {
-  updateCatMonthHint();
+  var el = document.getElementById('catScopeHint');
+  if (!el) return;
+  // 🆕 V3：明确显示当前产线范围
+  if (catLineScope === '__ALL__' || catLineScope === null) {
+    el.innerHTML = '<b>🌐 公共分类</b>：跨产线通用，所有产线都能用';
+    el.style.color = '#2563eb';
+  } else {
+    var lineCats = getLineCats(catLineScope);
+    el.innerHTML = '<b>🔒 ' + catLineScope + ' 专属分类</b>（共 ' + lineCats.length + ' 个）— 仅对该产线生效';
+    el.style.color = '#7c3aed';
+  }
 }
 
 // 🆕 V3：从其他产线复制分类 UI
