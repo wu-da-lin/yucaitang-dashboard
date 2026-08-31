@@ -4025,7 +4025,13 @@ function refreshShiftTableOnly() {
 function exportShiftTable() {
   var rows = document.querySelectorAll('#shiftTable tr');
   if (!rows.length) return;
-  var csv = '\uFEFF班次日期,班次,带班人,产品,实际生产(分),工作时间(分),理论加工(分),生产总数,OK数量,报废数量,样品数量,合格率,时间稼动率,性能稼动率,OEE\n';
+  // 🆕 2026-08-31 字段转义：含逗号/双引号/换行的单元格用双引号包 + 内部双引号转义为两个双引号
+  // 修复「产品」列多产品代码被拆列、「1,317」千分位被拆列等问题
+  function csvField(v) {
+    var s = String(v == null ? '' : v);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  var csv = '\uFEFF班次日期,班次,带班人,产品,实际生产(分),工作时间(分),理论加工(分),生产总数,OK数量,报废数量,样品数量,合格率,时间稼动率,性能稼动率,OEE\r\n';
   rows.forEach(function(tr, i) {
     if (i === 0) return;
     if (tr.parentElement && tr.parentElement.tagName === 'TFOOT') return; // 跳过汇总行
@@ -4033,7 +4039,7 @@ function exportShiftTable() {
     if (cells.length < 15) return;
     var vals = [];
     cells.forEach(function(td) { vals.push(td.textContent.trim()); });
-    csv += vals.join(',') + '\n';
+    csv += vals.map(csvField).join(',') + '\r\n';
   });
   var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   var url = URL.createObjectURL(blob);
