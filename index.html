@@ -822,11 +822,16 @@ body.reason-dragging-body{cursor:grabbing!important}
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <span class="filter-label" style="font-size:11px">展示</span>
         <button class="btn btn-secondary" id="scrapFilterBtn" style="font-size:11px;padding:3px 8px" onclick="openScrapFilter()">选择原因 ▼</button>
-        <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="resetScrapFilter()">重置</button>
+        <button class="btn btn-secondary" style="font-size:11px;padding:3px 10px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-weight:600" onclick="resetScrapFilter()" title="一键全显所有分类（修复未分类过多问题）">🔄 一键全显</button>
+        <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px;background:#fff7e6;border:1px solid #ffd591;color:#ad6800" onclick="runScrapDiagnose()">🔍 诊断未分类</button>
         <button class="ds-toggle-all" data-target="chartScrap" title="全部显示/隐藏" style="margin-left:4px">👁</button>
       </div>
     </div>
     <div class="chart-wrap tall"><canvas id="chartScrap"></canvas></div>
+    <details id="scrapDiagnoseBox" style="margin-top:10px;font-size:12px;color:#334;background:#f8fafc;border:1px solid #e3e8ef;border-radius:6px;padding:6px 10px;max-height:420px;overflow:auto">
+      <summary style="cursor:pointer;font-weight:600;color:#475569">📊 展开诊断详情（点击收起/展开）</summary>
+      <div id="scrapDiagnoseContent" style="margin-top:6px"></div>
+    </details>
   </div>
   <div class="chart-card">
     <div class="chart-title">
@@ -1666,6 +1671,13 @@ function rebuildRawData() {
     // 同步清洗：剔除 line 字段无效的记录（落料 xlsm 产线名称列出现 "：" 等异常值）
     var before = ds.records.length;
     var clean = ds.records.filter(function(r) { return r && isValidLineName(r.line); });
+    // === 2026-09-02 产品代号大小写归一化（修复 W05 vs w05 双柱 bug）===
+    // 员工手写 W 字母时大小写乱写，IndexedDB 缓存里两个键都被同时保留。
+    // 在 rebuildRawData 统一入口兜底，新老数据一次合并。
+    clean.forEach(function(r) {
+      if (r.pc) r.pc = String(r.pc).trim().toUpperCase();
+      if (r.product) r.product = String(r.product).trim();
+    });
     ds.records = clean.map(function(r) { r.line = String(r.line).trim(); return r; });
     // 重算该数据集的 lines 集合
     var lineSet = {};
@@ -1936,6 +1948,8 @@ function initDataStore() {
     var _extLines = extractLines(_ext);
     ALL_DATASETS = [{ id: 'external_' + Date.now(), fileName: 'production_data.js (' + _ext.length + '条)', line: '__all__', lines: _extLines, uploadedAt: '', recordCount: _ext.length, fieldMap: {}, calcProfile: { timeMultiplier: 1 }, records: _ext }];
     rebuildRawData();
+    // 🔧 自愈钩子：上传新数据 / 换解析器后强制清空旧 SCRAP_FILTER，让 renderScrapChart 重建白名单
+    setTimeout(function(){ try { forceResyncScrapFilter(); } catch(e){} }, 50);
     return Promise.resolve();
   }
   loadLineProfiles();
@@ -1944,6 +1958,7 @@ function initDataStore() {
     var lines = extractLines(merged);
     ALL_DATASETS = [{ id:'builtin_'+Date.now(), fileName:'独立版内嵌基线(5条产线)', line:'__all__', lines:lines, uploadedAt:'', recordCount:merged.length, fieldMap:{}, calcProfile:{timeMultiplier:1}, records: merged }];
     rebuildRawData();
+    setTimeout(function(){ try { forceResyncScrapFilter(); } catch(e){} }, 50);
     return Promise.resolve();
   }
   return getDB().then(function() { return idbGetAll(); }).then(function(list) {
@@ -1971,6 +1986,10 @@ function initDataStore() {
       return persistAllDatasets();
     }
     rebuildRawData();
+  }).then(function() {
+    // 🔧 自愈钩子：数据加载完毕立即尝试一次 SCRAP_FILTER 自动同步
+    //   即使 cache 让新代码没加载完，至少页面刚刷完这一次强制调用确保白名单扩张
+    setTimeout(function(){ try { forceResyncScrapFilter(); } catch(e){} }, 50);
   }).catch(function() {
     var merged = dedupMerge(window.RAW_DATA || [], []);
     var lines = extractLines(merged);
@@ -2280,7 +2299,316 @@ function getCurrentScrapList() {
       if (scrap > 0) map[UNCAT] = (map[UNCAT] || 0) + scrap;
     }
   });
+  // 自动同步 SCRAP_FILTER：用户新增/上传后，可能有新键名出现；
+  // 1) 白名单里已消失的键名自动移除；2) 新出现的键名自动加入并写回 localStorage
+  // 3) 兜底：SCRAP_FILTER 是 null / 空数组时，全部初始化为当前所有键
+  try {
+    var allKeys = Object.keys(map);
+    if (allKeys.length) {
+      var allowSet = {};
+      if (Array.isArray(SCRAP_FILTER)) {
+        SCRAP_FILTER.forEach(function(s) { if (map[s] !== undefined) allowSet[s] = true; });
+      }
+      var changed = !Array.isArray(SCRAP_FILTER) || SCRAP_FILTER.length === 0;
+      allKeys.forEach(function(k) { if (!allowSet[k]) { allowSet[k] = true; changed = true; } });
+      if (changed) {
+        SCRAP_FILTER = Object.keys(allowSet);
+        try { localStorage.setItem('SCRAP_FILTER', JSON.stringify(SCRAP_FILTER)); } catch(ev) {}
+      }
+    }
+  } catch(eSync) {}
   return Object.keys(map).map(function(s) { return { name: s, total: map[s] }; }).sort(function(a, b) { return b.total - a.total; });
+}
+
+// === 2026-09-02 [动态版] 报废分类（每班每分类明细表） ===
+// 旧版曾硬编码 souring2 2025-08 的 46 类 315 片老数据（来源笔记 key*N 备注解析）
+// 现已改为实时从 crossGetRecords() 取当前已上传的 RAW_DATA，按 (日期+班次) 聚合
+// so 数据永远跟饼图对上得，不再"下面表格写 315、饼图却 115"
+//
+// 关键:
+//   1) 数据范围 = 当前选中产线（currentLine），与饼图一致
+//   2) 月份范围 = 自动取当前最大月份
+//   3) xaj-group-merge 已经在 parseXLSXData 末尾把 X-AJ 标准列按 (日期+班次) 重新分摊到产出行
+//   4) 算详情时复用饼图 ALIAS 归一化，避免"取样/断煚"和"取样"被计两次
+//   5) 末尾主动 forceResyncScrapFilter，确保饼图自动展开全部 6 类
+
+window.SC_ALIAS = window.SC_ALIAS || {
+  '取样/断煚': '取样',
+  '取样/压斜': '取样/压斜',
+  '板料变形/划伤': '板料变形/划伤',
+  '变形': '板料变形/划伤',
+  '划伤': '板料变形/划伤',
+  '未焚透': '未穿透'
+};
+
+function renderAugClassDetail(targetId) {
+  var box = document.getElementById(targetId || 'scrapDiagnoseContent');
+  if (!box) return;
+  var recs = (typeof crossGetRecords === 'function') ? crossGetRecords() : [];
+  if (!recs.length) return;
+  var line = (typeof currentLine !== 'undefined' && currentLine) ? currentLine : 'all';
+  var lineData = (line === 'all') ? recs : recs.filter(function(r){ return r.line === line; });
+  var maxMonth = '';
+  for (var i = 0; i < lineData.length; i++) {
+    var sd = lineData[i].sd || lineData[i].date || '';
+    var m = sd.substring(0, 7);
+    if (/^\d{4}-\d{2}$/.test(m) && m > (maxMonth || '0000-00')) maxMonth = m;
+  }
+  if (!maxMonth) return;
+  var monthData = lineData.filter(function(r){
+    var sd = r.sd || r.date || '';
+    return sd.substring(0, 7) === maxMonth;
+  });
+  if (!monthData.length) return;
+
+  var ALIAS = (typeof window.SC_ALIAS !== 'undefined') ? window.SC_ALIAS : {};
+  function normKey(k) { return ALIAS[k] || k; }
+  function nnum(v) { v = Number(v); return isNaN(v) ? 0 : v; }
+  function isProdTime2(s) { return s === '实际生产时间' || s === '样品生产'; }
+
+  var classesMap = {};
+  var byKey = {};
+  monthData.forEach(function(r){
+    var k = (r.sd || r.date || '') + '|' + (r.shift || '') + '|' + (r.line || '');
+    if (!byKey[k]) byKey[k] = { prodL: 0, allXaj: {}, day: (r.sd||r.date||''), shift: (r.shift||'') };
+    var g = byKey[k];
+    if (isProdTime2(r.status)) g.prodL += nnum(r.scrap);
+    if (r.scrap_reasons) {
+      for (var kn in r.scrap_reasons) {
+        var v = nnum(r.scrap_reasons[kn]);
+        if (v > 0) g.allXaj[kn] = (g.allXaj[kn] || 0) + v;
+      }
+    }
+  });
+  Object.keys(byKey).forEach(function(k){
+    var g = byKey[k];
+    Object.keys(g.allXaj).forEach(function(xk){
+      var nk = normKey(xk);
+      if (!classesMap[nk]) classesMap[nk] = { total: 0, records: [] };
+      var v = g.allXaj[xk];
+      classesMap[nk].total += v;
+      classesMap[nk].records.push({ day: g.day, shift: g.shift, qty: v });
+    });
+  });
+  Object.keys(byKey).forEach(function(k){
+    var g = byKey[k];
+    if (g.prodL > 0 && Object.keys(g.allXaj).length === 0) {
+      if (!classesMap['未分类']) classesMap['未分类'] = { total: 0, records: [] };
+      classesMap['未分类'].total += g.prodL;
+      classesMap['未分类'].records.push({ day: g.day, shift: g.shift, qty: g.prodL });
+    }
+  });
+
+  var classes = Object.keys(classesMap).map(function(k){
+    return { name: k, total: classesMap[k].total, records: classesMap[k].records };
+  }).sort(function(a,b){ return b.total - a.total; });
+  var totalScrap = classes.reduce(function(s,c){ return s + c.total; }, 0);
+
+  var lineLabel = (line === 'all') ? '全部产线' : (line || '未指定产线');
+  var scrapFilterCount = Array.isArray(SCRAP_FILTER) ? SCRAP_FILTER.length : '?';
+  var NIGHT = "夜";
+  var DAY = "白";
+  var TIMES = "×";
+  var COMMA = "，";
+  var CHART = "📊";
+  var BULB = "💡";
+
+  var html = '';
+  html += '<div style="margin-top:18px;padding-top:10px;border-top:2px dashed #d1d5db">';
+  html += '<div style="font-weight:600;font-size:13px;color:#1f2937;margin-bottom:6px">' + CHART + ' <b>' + escapeHtml(lineLabel) + '</b> <b style="color:#1f6feb">' + maxMonth + '</b> 报废分类明细（实时自当前已上传的 xlsx，已含 xaj-group-merge 跨行聚合）</div>';
+  html += '<div style="font-size:11px;color:#6b7280;margin-bottom:8px">共 <b>' + classes.length + '</b> 个分类，合计 <b>' + totalScrap.toFixed(0) + '</b> 片报废（组内 X-AJ 累计）。饼图已自动展开全部 <b>' + scrapFilterCount + '</b> 类（可点 [选择原因] 复选）。</div>';
+  html += '<table style="font-size:11px;border-collapse:collapse;width:100%;max-height:340px;overflow:auto;display:block">';
+  html += '<thead><tr style="background:#f3f4f6">';
+  html += '<th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">分类</th>';
+  html += '<th style="text-align:right;padding:6px 8px;border:1px solid #e5e7eb">总片数</th>';
+  html += '<th style="text-align:right;padding:6px 8px;border:1px solid #e5e7eb">占比</th>';
+  html += '<th style="text-align:right;padding:6px 8px;border:1px solid #e5e7eb">班次数</th>';
+  html += '<th style="text-align:left;padding:6px 8px;border:1px solid #e5e7eb">出现班次</th>';
+  html += '</tr></thead><tbody>';
+  classes.forEach(function(c){
+    var shiftMap = {};
+    c.records.forEach(function(r){
+      var dStr = (r.day || '').substring(5) || '??-??';
+      var sStr = (r.shift === NIGHT) ? NIGHT : (r.shift === DAY ? DAY : (r.shift || '?'));
+      var key = dStr + sStr;
+      if (!shiftMap[key]) shiftMap[key] = { label: dStr + sStr, qty: 0 };
+      shiftMap[key].qty += r.qty;
+    });
+    var groups = Object.values(shiftMap).map(function(g){ return g.label + ' ' + TIMES + Math.round(g.qty) + '片'; });
+    html += '<tr>';
+    html += '<td style="padding:4px 8px;border:1px solid #e5e7eb"><b>' + escapeHtml(c.name) + '</b></td>';
+    html += '<td style="padding:4px 8px;border:1px solid #e5e7eb;text-align:right"><b>' + Math.round(c.total) + '</b></td>';
+    html += '<td style="padding:4px 8px;border:1px solid #e5e7eb;text-align:right">' + (totalScrap > 0 ? (c.total/totalScrap*100).toFixed(1) : '0.0') + '%</td>';
+    html += '<td style="padding:4px 8px;border:1px solid #e5e7eb;text-align:right">' + c.records.length + '</td>';
+    html += '<td style="padding:4px 8px;border:1px solid #e5e7eb;color:#4b5563;font-size:10px">' + escapeHtml(groups.join(COMMA)) + '</td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  html += '<div style="font-size:10px;color:#9ca3af;margin-top:6px">' + BULB + ' 本表数据与饼图同源（都走同一套 ALIAS 归一化 + xaj-group-merge）。如发现"未分类"偏高请到诊断面板看"按月份拆解"。</div>';
+  html += '</div>';
+
+  while (box.firstChild) box.removeChild(box.firstChild);
+  var dn = document.createElement('div');
+  dn.innerHTML = html;
+  while (dn.firstChild) box.appendChild(dn.firstChild);
+
+  try {
+    if (typeof forceResyncScrapFilter === 'function') {
+      var n = forceResyncScrapFilter();
+      console.log('[renderAugClassDetail] trigger forceResyncScrapFilter -> ' + n + ' keys');
+    }
+  } catch(eF){ try { console.warn('[renderAugClassDetail.forceResync]', eF); } catch(ev){} }
+}
+
+
+function runScrapDiagnose() {
+  var box = document.getElementById('scrapDiagnoseBox');
+  var content = document.getElementById('scrapDiagnoseContent');
+  if (!box || !content) { alert('未找到诊断容器'); return; }
+  box.open = true;
+  var recs = crossGetRecords();
+  if (!recs.length) { content.innerHTML='<b style="color:#c0392b">没有数据</b>：请先上传或加载生产数据。'; return; }
+  var line = (typeof currentLine !== 'undefined' && currentLine) ? currentLine : 'all';
+  var data = (line === 'all') ? recs : recs.filter(function(r){ return r.line === line; });
+  var UNCAT = (typeof UNCAT !== 'undefined') ? UNCAT : '未分类';
+  function scrapQty(r){ return num(r.scrap); }
+  function reasonsQty(r){ if(!r.scrap_reasons) return 0; var s=0; for(var k in r.scrap_reasons) s+=num(r.scrap_reasons[k]); return s; }
+  var allScrap = data.filter(function(r){ return scrapQty(r) > 0; });
+  var noField = allScrap.filter(function(r){ return !r.scrap_reasons; });
+  var detailZero = allScrap.filter(function(r){ return r.scrap_reasons && reasonsQty(r) === 0; });
+  var classified = allScrap.filter(function(r){ return r.scrap_reasons && reasonsQty(r) > 0; });
+  var uncQty = noField.reduce(function(a,r){return a+scrapQty(r);},0) + detailZero.reduce(function(a,r){return a+scrapQty(r);},0);
+  var totQty = allScrap.reduce(function(a,r){return a+scrapQty(r);},0);
+  var uncRatio = totQty ? (uncQty/totQty*100) : 0;
+  var dist = {};
+  classified.forEach(function(r){
+    var s13 = reasonsQty(r); var scrap = scrapQty(r); var ratio = s13>0 ? scrap/s13 : 0;
+    for (var k in r.scrap_reasons) { var v = num(r.scrap_reasons[k]); if (v>0) dist[k] = (dist[k]||0) + v*ratio; }
+  });
+  var distArr = Object.keys(dist).map(function(k){return {name:k, qty:dist[k]};}).sort(function(a,b){return b.qty-a.qty;});
+  function fmt(r){ return '日期 '+escapeHtml(r.sd||'')+' / 产线 '+escapeHtml(r.line||'')+' / 报废 '+Math.round(scrapQty(r))+' 件 / scrap_reasons='+(r.scrap_reasons?JSON.stringify(r.scrap_reasons):'无'); }
+  function sample(rows){ return rows.slice(0,5).map(fmt).join('<br>'); }
+  var html = '';
+  html += '<div style="font-weight:600;margin-bottom:6px">🔍 报废未分类诊断（当前产线：<b>'+(line||'全部')+'</b>）</div>';
+  html += '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">';
+  html += '<span>报废记录数：<b>'+allScrap.length+'</b></span>';
+  html += '<span>已分类：<b style="color:#1a7f37">'+classified.length+'</b></span>';
+  html += '<span>未分类：<b style="color:#c0392b">'+(noField.length+detailZero.length)+'</b>（占报废件数 <b style="color:#c0392b">'+uncRatio.toFixed(1)+'%</b>）</span>';
+  html += '</div>';
+  html += '<div style="font-size:11px;color:#5a6c80;margin-bottom:8px">未分类来源拆解：① 无 scrap_reasons 字段 <b>'+noField.length+'</b> 条 ｜ ② 13 列明细全为 0 <b>'+detailZero.length+'</b> 条</div>';
+  if (distArr.length) {
+    html += '<div style="font-weight:600;margin:8px 0 4px">已分类原因分布（加权件数）：</div>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+    html += '<tr style="background:#eef2f7"><th style="text-align:left;padding:3px 6px">原因</th><th style="text-align:right;padding:3px 6px">件数</th><th style="text-align:right;padding:3px 6px">占比</th></tr>';
+    var dTot = distArr.reduce(function(a,x){return a+x.qty;},0);
+    distArr.forEach(function(x){
+      html += '<tr><td style="padding:3px 6px">'+escapeHtml(x.name)+'</td><td style="text-align:right;padding:3px 6px">'+Math.round(x.qty)+'</td><td style="text-align:right;padding:3px 6px">'+((x.qty/dTot)*100).toFixed(1)+'%</td></tr>';
+    });
+    html += '</table>';
+  } else {
+    html += '<div style="color:#c0392b;margin:8px 0">⚠️ 没有任何已分类记录——全部报废记录的 13 列明细都没被识别。请检查上传的 xlsx 列名是否匹配。</div>';
+  }
+  html += '<div style="font-weight:600;margin:8px 0 4px">未分类样本（无字段）：</div>';
+  html += '<div style="font-size:11px;color:#5a6c80">'+(noField.length?sample(noField):'无')+'</div>';
+  html += '<div style="font-weight:600;margin:8px 0 4px">未分类样本（13 列全 0）：</div>';
+  html += '<div style="font-size:11px;color:#5a6c80">'+(detailZero.length?sample(detailZero):'无')+'</div>';
+  // 按月份拆解（关键：定位哪个月的数据没生成 scrap_reasons 字段）
+  var byMonth = {};
+  allScrap.forEach(function(r) {
+    var m = (r.sd || r.date || '').substring(0, 7);
+    if (!m || !/^\d{4}-\d{2}$/.test(m)) m = '未知';
+    if (!byMonth[m]) byMonth[m] = { total: 0, noField: 0, detailZero: 0, classified: 0 };
+    byMonth[m].total++;
+    if (!r.scrap_reasons) byMonth[m].noField++;
+    else if (reasonsQty(r) === 0) byMonth[m].detailZero++;
+    else byMonth[m].classified++;
+  });
+  var months = Object.keys(byMonth).sort();
+  html += '<div style="font-weight:600;margin:14px 0 4px">按月份拆解（无字段 vs 13列全0 vs 已分类）：</div>';
+  html += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+  html += '<tr style="background:#eef2f7"><th style="text-align:left;padding:3px 6px">月份</th><th style="text-align:right;padding:3px 6px">报废</th><th style="text-align:right;padding:3px 6px;color:#c0392b">无字段</th><th style="text-align:right;padding:3px 6px;color:#ad6800">13列全0</th><th style="text-align:right;padding:3px 6px;color:#1a7f37">已分类</th></tr>';
+  months.forEach(function(m) {
+    var x = byMonth[m];
+    html += '<tr><td style="padding:3px 6px">' + m + '</td><td style="text-align:right;padding:3px 6px">' + x.total + '</td><td style="text-align:right;padding:3px 6px">' + x.noField + '</td><td style="text-align:right;padding:3px 6px">' + x.detailZero + '</td><td style="text-align:right;padding:3px 6px">' + x.classified + '</td></tr>';
+  });
+  html += '</table>';
+  html += '<div style="margin-top:10px;font-size:11px;color:#8a9bb0">说明：① 无字段 = 该记录完全没有 scrap_reasons 键（很可能是内置基线数据，没跑过 xlsx 解析）；② 13列全0 = 13 列明细都填了但总和为0；两种都进饼图「未分类」。<br>👉 快速判断：若某月「无字段」≈ 该月全部报废记录且「已分类」=0，说明这个月的数据不是 xlsx 上传来的，需要单独补传。</div>';
+
+  // 新增：实际 xlsx 表头 vs 列表名对比（让用户直接看到"你那几列实际叫什么"）
+  var infoMap = (typeof window !== 'undefined' && window.__LAST_PARSE_INFO__) ? window.__LAST_PARSE_INFO__ : null;
+  if (!infoMap) {
+    try {
+      var raw = localStorage.getItem('__LAST_PARSE_INFO__');
+      if (raw) infoMap = JSON.parse(raw);
+    } catch(ee){}
+  }
+  if (!infoMap) infoMap = {};
+  var infoList = [];
+  var seenFn = {};
+  Object.keys(infoMap).forEach(function(k){
+    var info = infoMap[k];
+    if (!info || !info.filename) return;
+    if (line && line !== 'all' && info.line && info.line !== line) return;
+    if (seenFn[info.filename]) return;
+    seenFn[info.filename] = true;
+    infoList.push(info);
+  });
+  if (infoList.length) {
+    html += '<div style="font-weight:600;margin:18px 0 4px">📋 最近上传的 xlsx 实际表头（点击展开核对）：</div>';
+    infoList.forEach(function(info){
+      var matchedSet = {};
+      info.matchedKeys.forEach(function(k){ matchedSet[k] = true; });
+      var matchedRows = info.matchedKeys.map(function(k){ return '<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;background:#d4edda;color:#1a7f37">'+escapeHtml(k)+'</span>'; }).join('');
+      var unmatchedRows = info.unmatchedNames.map(function(k){ return '<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;background:#f8d7da;color:#c0392b;text-decoration:line-through">'+escapeHtml(k)+'</span>'; }).join('');
+      var allCols = info.headers.map(function(h, i){
+        var isMatched = info.matchedKeys.some(function(k){ return info.headers[i] && String(info.headers[i]).trim() === k; });
+        var bg = isMatched ? '#d4edda' : '#fff8e1';
+        var fg = isMatched ? '#1a7f37' : '#5a6c80';
+        return '<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;background:'+bg+';color:'+fg+'">['+i+'] '+escapeHtml(h||'(空)')+'</span>';
+      }).join('');
+      html += '<details style="margin-bottom:8px;font-size:11px;border:1px solid #e0e0f0;border-radius:4px;padding:6px">';
+      html += '<summary style="cursor:pointer;color:#1f6feb;font-weight:600">'+escapeHtml(info.filename)+'（产线 '+(info.line||'未知')+'）— 已匹配 '+info.matchedKeys.length+' / '+info.unmatchedNames.length+' 未匹配</summary>';
+      html += '<div style="margin-top:8px">';
+      html += '<div style="margin-bottom:6px"><b style="color:#1a7f37">✅ 列表中已匹配上的列（'+info.matchedKeys.length+'）：</b><br>'+(matchedRows||'<span style="color:#c0392b">无！0 个列被识别</span>')+'</div>';
+      html += '<div style="margin-bottom:6px"><b style="color:#c0392b">❌ 列表中要找但未匹配的列名（'+info.unmatchedNames.length+'）：</b><br>'+(unmatchedRows||'<span style="color:#1a7f37">全部匹配上！</span>')+'</div>';
+      html += '<div style="margin-bottom:6px"><b>📝 该文件全部实际列头（'+info.headers.length+' 列，绿底=已匹配、黄底=未识别）：</b><br>'+allCols+'</div>';
+      html += '<div style="color:#ad6800;margin-top:6px;padding:6px;background:#fff8e1;border-radius:3px">💡 如果黄底列里包含真实的报废明细（不是日期/产线/产品等标准字段），请把它的<b>列名</b>告诉我，我加进列表后下次上传就能识别。</div>';
+      html += '</div></details>';
+    });
+  } else {
+    html += '<div style="margin-top:18px;padding:10px;background:#fff3cd;border-radius:4px;font-size:12px;color:#856404">⚠️ 当前会话<b>没检测到 xlsx 上传记录</b>（可能刷新过页面）。请<b>重新上传一次 souring2 的 xlsx</b>，然后再点诊断按钮，会列出实际表头。</div>';
+  }
+
+  // 直显当前 records 里 scrap_reasons 的实际键名清单（避免猜测列名）
+  var keySet = {};
+  data.forEach(function(r){ if (r.scrap_reasons) for (var kk in r.scrap_reasons) keySet[kk] = (keySet[kk]||0) + 1; });
+  var keyList = Object.keys(keySet);
+  var filterList = Array.isArray(SCRAP_FILTER) ? SCRAP_FILTER : null;
+  var filteredCount = filterList ? filterList.filter(function(k){ return keySet[k]; }).length : keyList.length;
+  var unusedFilter = filterList ? filterList.filter(function(k){ return !keySet[k]; }) : [];
+  html += '<div style="font-weight:600;margin:14px 0 4px">🔑 当前 records 里 scrap_reasons 实际键名（'+keyList.length+' 个，每键出现记录数）：</div>';
+  if (keyList.length) {
+    html += '<div style="font-size:11px;background:#eef2f7;padding:6px;border-radius:3px;line-height:1.7">';
+    keyList.forEach(function(k){
+      var hiddenInPie = filterList && filterList.indexOf(k) < 0;
+      var bg = hiddenInPie ? '#fff3cd' : '#fff';
+      var tag = hiddenInPie ? ' <b style="color:#c0392b">⚠饼图未显示</b>' : '';
+      html += '<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:3px;background:'+bg+';border:1px solid #cfd8dc">'+escapeHtml(k)+' <b style="color:#1f6feb">'+keySet[k]+'</b>'+tag+'</span>';
+    });
+    html += '</div>';
+    if (filterList) {
+      html += '<div style="margin-top:8px;padding:8px;background:#fff3cd;border-radius:4px;font-size:11px;color:#856404">';
+      html += '<b>ℹ SCRAP_FILTER 白名单状态：</b>当前勾选 <b>'+filteredCount+'</b>/'+keyList.length+' 个键。';
+      if (filteredCount < keyList.length) html += ' <b style="color:#c0392b">未显示的 '+ (keyList.length-filteredCount) +' 个分类被白名单过滤了</b>，点报废饼图右下「<b>重置</b>」按钮即可全显。';
+      html += '</div>';
+    }
+  } else {
+    html += '<div style="font-size:11px;color:#c0392b">所有记录都没有 scrap_reasons 字段——多半上传的 xlsx 没解析出明细列。</div>';
+  }
+
+  content.innerHTML = html;
+  // 追加 souring2 2025-08 离线报废分类明细（2026-09-02 添入）
+  try { renderAugClassDetail(); } catch(eA) { console.warn('[renderAugClassDetail]', eA); }
 }
 
 function openStatusFilter() {
@@ -2353,8 +2681,30 @@ function applyScrapFilter() {
 function resetScrapFilter() {
   SCRAP_FILTER = null;
   try { localStorage.removeItem('SCRAP_FILTER'); } catch(e) {}
+  // 立即重渲染——renderScrapChart 内的"自动同步"块会把当前所有键加入白名单
   renderScrapChart(getFilteredData());
-  showToast('info', '已重置', '展示全部报废原因');
+  // 把新白名单同步写回 localStorage（renderScrapChart 已经做过，这里只是兜底）
+  try {
+    var total = (typeof SCRAP_FILTER === 'object' && SCRAP_FILTER) ? SCRAP_FILTER.length : 0;
+    if (total > 0) localStorage.setItem('SCRAP_FILTER', JSON.stringify(SCRAP_FILTER));
+  } catch(e) {}
+  showToast('success', '已一键全显', '当前所有报废原因（' + (Array.isArray(SCRAP_FILTER) ? SCRAP_FILTER.length : '全部') + ' 项）已展开');
+}
+
+// 自愈专用：清空 SCRAP_FILTER 并触发 renderScrapChart 让它重建白名单
+//   用于缓存导致新同步代码未加载、或白名单状态不一致时一次性修复
+function forceResyncScrapFilter() {
+  try {
+    SCRAP_FILTER = null;
+    try { localStorage.removeItem('SCRAP_FILTER'); } catch(e) {}
+    renderScrapChart(getFilteredData());
+    var n = Array.isArray(SCRAP_FILTER) ? SCRAP_FILTER.length : 0;
+    console.log('[forceResync] 白名单已重置并同步=' + n + ' 项');
+    return n;
+  } catch(e) {
+    console.warn('[forceResync]', e);
+    return 0;
+  }
 }
 
 // ===== 班次生产数据明细的「具体班次」多选（持久化 SHIFT_FILTER_V1）=====
@@ -4750,6 +5100,16 @@ function renderProductChart(data) {
 function renderScrapChart(data) {
   destroyChart('chartScrap');
   var scrapMap = {};
+  // 别名归一化：把历史上可能重复的多个键名合并到一个规范名（避免「取样 vs 取样/断焊」「变形 vs 划伤 vs 板料变形/划伤」这种多键同数据问题）
+  var ALIAS = {
+    '取样/断焊': '取样',           // 老解析器 → 新解析器都归 "取样"
+    '取样/压斜': '取样/压斜',      // 保留
+    '板料变形/划伤': '板料变形/划伤', // 保留（统一用此名）
+    '变形': '板料变形/划伤',        // 老解析器 → "板料变形/划伤"
+    '划伤': '板料变形/划伤',        // 老解析器 → "板料变形/划伤"
+    '未焊透': '未穿透'              // 老名字"未焊透"也归并到"未穿透"（你 xlsx 实际叫"未穿透"）
+  };
+  function normKey(k) { return ALIAS[k] || k; }
   data.forEach(function(r) {
     if (!isProdTime(r.status)) return;
     var scrap = num(r.scrap);
@@ -4762,8 +5122,9 @@ function renderScrapChart(data) {
         for (var k2 in r.scrap_reasons) {
           var v = num(r.scrap_reasons[k2]);
           if (v > 0) {
-            if (!scrapMap[k2]) scrapMap[k2] = 0;
-            scrapMap[k2] += v * ratio;
+            var nk = normKey(k2);
+            if (!scrapMap[nk]) scrapMap[nk] = 0;
+            scrapMap[nk] += v * ratio;
           }
         }
       } else if (s13 === 0 && scrap > 0) {
@@ -4778,6 +5139,32 @@ function renderScrapChart(data) {
       }
     }
   });
+  // 自动同步 SCRAP_FILTER：用户新增/上传后，可能有新键名出现；
+  // 1) 白名单里已消失的键名（如"取样/断焊"已归并到"取样"）自动移除
+  // 2) 新出现的键名自动加入白名单并写回 localStorage
+  // 3) 关键：用归一化后的 scrapMap 做白名单同步，避免"取样/断焊"还在白名单但已归并
+  // 4) 兜底：SCRAP_FILTER 是 null / 空数组时，全部初始化为当前所有键（避免 91.7% 未分类假象）
+  try {
+    var allKeys = Object.keys(scrapMap);
+    if (allKeys.length) {
+      var allowSet = {};
+      // 把白名单里的旧名映射到归一化名
+      if (Array.isArray(SCRAP_FILTER)) {
+        SCRAP_FILTER.forEach(function(s) {
+          var n = normKey(s);
+          if (scrapMap[n] !== undefined) allowSet[n] = true;
+        });
+      }
+      // 把当前所有键都加进白名单（保证新键能显示）
+      var changed = !Array.isArray(SCRAP_FILTER) || SCRAP_FILTER.length === 0;
+      allKeys.forEach(function(k) { if (!allowSet[k]) { allowSet[k] = true; changed = true; } });
+      if (changed) {
+        SCRAP_FILTER = Object.keys(allowSet);
+        try { localStorage.setItem('SCRAP_FILTER', JSON.stringify(SCRAP_FILTER)); } catch(ev) {}
+        try { console.log('[scrap-filter-sync] 已同步白名单 =', SCRAP_FILTER.length, '个键:', SCRAP_FILTER.join(' / ')); } catch(ev) {}
+      }
+    }
+  } catch(eSync) { try { console.warn('[scrap-filter-sync]', eSync); } catch(ev){} }
   // 应用选择展示（白名单过滤；null=全选；空数组=全不选）
   var allLabels = Object.keys(scrapMap);
   if (Array.isArray(SCRAP_FILTER)) {
@@ -5047,12 +5434,20 @@ function renderProductScrapChart(data) {
   data.forEach(function(r) {
     if (!isProdTime(r.status)) return;
     var line = r.line || '未分类';
-    var p = r.product || r.pc || '';
-    if (!p) return;
+    // === 2026-09-02 「用产品名称那列的名字」（用户反馈 / 育材堂规范）
+    // xlsx 表头：产品代号列（pc）常填长描述如"岚图-H66-左门环/岚图-H66-右门环"，
+    // 产品名称列（pn）填短码如"H56/H66/DH1/W05"。dashboard 之前按 pc 字段归一化作 key+label，
+    // 导致 y 轴显示拼接长字符串。改用 pn（r.product）字段做 key 和 label。
+    // - key 归一化用 pn 字段（短码）→ 同型号自动合并成一条柱
+    // - label 用 first-seen 的 r.product 字段原值（H56/H66）
+    // - pn 空时退到 pc 字段（防御员工漏填产品名称列）
+    var pnRaw = r.product || r.pc || '';
+    var pn = String(pnRaw).trim().toUpperCase();
+    if (!pn) return;
     if (!byLine[line]) byLine[line] = {};
-    if (!byLine[line][p]) byLine[line][p] = { scrap: 0, total: 0 };
-    byLine[line][p].scrap += num(r.scrap);
-    byLine[line][p].total += num(r.total);
+    if (!byLine[line][pn]) byLine[line][pn] = { scrap: 0, total: 0, label: pnRaw };
+    byLine[line][pn].scrap += num(r.scrap);
+    byLine[line][pn].total += num(r.total);
   });
 
   // 3) 准备：目标、只看超标、产线排序
@@ -5071,9 +5466,10 @@ function renderProductScrapChart(data) {
   lines.forEach(function(line) {
     var items = Object.keys(byLine[line]).map(function(p) {
       var v = byLine[line][p];
-      return { product: p, scrap: v.scrap, total: v.total, rate: v.total > 0 ? v.scrap / v.total * 100 : 0 };
+      // label 优先用 first-seen 的 r.product 字段值（产品名称列短码），pn 空时退回归一化 key
+      return { product: v.label || p, _key: p, scrap: v.scrap, total: v.total, rate: v.total > 0 ? v.scrap / v.total * 100 : 0 };
     }).filter(function(it) { return it.total > 0; })  // 剔除无产出产品
-      .filter(function(it) { return isProductScrapVisible(line, it.product); });  // 产品多选过滤
+      .filter(function(it) { return isProductScrapVisible(line, it._key); });  // 产品多选过滤（用归一化 key）
     if (onlyBad) items = items.filter(function(it) { return it.rate > target; });
     if (items.length === 0) return;
     items.sort(function(a, b) { return b.rate - a.rate; });
@@ -5165,11 +5561,12 @@ function exportProductScrapTable() {
   data.forEach(function(r) {
     if (!isProdTime(r.status)) return;
     var line = r.line || '未分类';
-    var p = r.product || r.pc || '';
+    var pnRaw = r.product || r.pc || '';
+    var p = String(pnRaw).trim().toUpperCase();
     if (!p) return;
     if (!isProductScrapVisible(line, p)) return;  // 与卡片一致：隐藏的不导出
     if (!byLine[line]) byLine[line] = {};
-    if (!byLine[line][p]) byLine[line][p] = { scrap: 0, total: 0 };
+    if (!byLine[line][p]) byLine[line][p] = { scrap: 0, total: 0, label: pnRaw };
     byLine[line][p].scrap += num(r.scrap);
     byLine[line][p].total += num(r.total);
   });
@@ -5182,7 +5579,9 @@ function exportProductScrapTable() {
       var v = byLine[line][p];
       if (v.total <= 0) return;
       var rate = v.scrap / v.total * 100;
-      rows.push([line, p, v.total, v.scrap, rate.toFixed(3), rate > _productScrapTarget ? '是' : '否', _productScrapTarget.toFixed(2)]);
+      // 「产品」列显示用户字段原值（pn 短码或 pc 长串），归一化 key 仅作为分组用
+      var label = v.label || p;
+      rows.push([line, label, v.total, v.scrap, rate.toFixed(3), rate > _productScrapTarget ? '是' : '否', _productScrapTarget.toFixed(2)]);
       anyRow = true;
     });
   });
@@ -8648,11 +9047,24 @@ function parseXLSXData(arrayBuffer, filename) {
   var isMultiChamber = false;
   var chamberCols = [];
 
+  // 选 sheet 策略：遍历所有 sheet，找"日历日期"列所在的 sheet（兼容多种 sheet 名：
+  // 历史「souring2数据源」、用户当前「souring2数据库」、其他含日历日期的 sheet）。
+  // 老逻辑「sheetName.indexOf('数据源')<0」会把「souring2数据库」这种名字整张跳过，导致强刷重传都跑旧数据。
   workbook.SheetNames.forEach(function(sheetName) {
-    if (sheetName.indexOf('数据源') < 0) return;
     var sheet = workbook.Sheets[sheetName];
     var jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
     if (!jsonData.length) return;
+    // 头5行内找「日历日期」列（标准生产记录表头）
+    var hasCalDate = false;
+    for (var rr = 0; rr < Math.min(5, jsonData.length); rr++) {
+      var row = jsonData[rr] || [];
+      for (var cc = 0; cc < row.length; cc++) {
+        var hh = row[cc];
+        if (hh && String(hh).indexOf('日历日期') >= 0) { hasCalDate = true; break; }
+      }
+      if (hasCalDate) break;
+    }
+    if (!hasCalDate) return;
 
     // Find header row
     var headerRow = -1;
@@ -8675,15 +9087,32 @@ function parseXLSXData(arrayBuffer, filename) {
     });
 
     // Fuzzy column finder with exact-match priority
+    // 兼容 Excel 透视表给字段加的前缀（如 "求和项:XXX"、"计数:XXX"、"求平均值:XXX"），先剥前缀再匹配
+    function normalizeHeader(k) {
+      var s = String(k);
+      // 剥前缀："求和项:"、"求平均值: "、"计数: "、"求最大值:" 等
+      s = s.replace(/^[求求][和平均合项计数大最小][项和值个数]?[：:]?\s*/g, '');
+      // 兼容 "Sum of XXX" 英文
+      s = s.replace(/^Sum of\s+/i, '');
+      s = s.replace(/^Count of\s+/i, '');
+      return s.trim();
+    }
     function findCol(keyword, excludeKeyword) {
       var exact = -1;
       for (var key in colMap) {
         if (key === keyword) { exact = colMap[key]; break; }
       }
       if (exact >= 0) return exact;
+      // 剥前缀后精确匹配（如 "求和项:未焊透" → 归到 "未焊透" 同一列）
+      for (var key2 in colMap) {
+        if (normalizeHeader(key2) === keyword) { exact = colMap[key2]; break; }
+      }
+      if (exact >= 0) return exact;
+      // 模糊匹配（含前缀的也能匹配上）
       for (var key in colMap) {
-        if (key.indexOf(keyword) >= 0) {
-          if (excludeKeyword && key.indexOf(excludeKeyword) >= 0) continue;
+        var keyN = normalizeHeader(key);
+        if (keyN.indexOf(keyword) >= 0 || key.indexOf(keyword) >= 0) {
+          if (excludeKeyword && (key.indexOf(excludeKeyword) >= 0 || keyN.indexOf(excludeKeyword) >= 0)) continue;
           return colMap[key];
         }
       }
@@ -8742,8 +9171,21 @@ function parseXLSXData(arrayBuffer, filename) {
 
     // Scrap reason columns
     var scrapReasonCols = {};
-    var scrapReasonNames = ['取样/断焊', '未焊透', '高度差', '凹陷', '焊偏', '间隙大', '焊接中断', '叠板', '焊缝细', '端差', '孔洞', '凸起', '板料变形/划伤', '头尾料', '变形', '换型报废', '切短', '辊印', '划伤', '平面度不良', '黑斑', '镀层不良', '锈蚀'];
-    scrapReasonNames.forEach(function(name) {
+    // 冲压类（C/B 系列）
+    // 报废明细标准列名（兼容历史 + 用户实际叫法）
+    // 未焊透/未穿透 同义都列出；断裂、取样/压斜、报废斜 等 souring 实际列名也加进来
+    var scrapReasonNames = [
+      '取样/断焊', '未焊透', '未穿透',          // 未焊透/未穿透 同义
+      '高度差', '凹陷', '焊偏', '间隙大', '焊接中断', '叠板',
+      '焊缝细', '端差', '孔洞', '凸起',
+      '板料变形/划伤', '头尾料', '变形', '换型报废', '切短', '辊印', '划伤',
+      '平面度不良', '黑斑', '镀层不良', '锈蚀', '断裂',
+      '取样/压斜', '压斜', '取样', '报废斜'
+    ];
+    // 焊接类（souring 系列）— 补充 8 个常见焊接缺陷
+    var scrapReasonNamesWeld = ['未熔合', '错边量', '表面气孔', '气孔', '裂纹', '裂缝', '焊瘤', '飞溅', '其他', '咬边', '烧穿', '夹渣'];
+    var allScrapReasonNames = scrapReasonNames.concat(scrapReasonNamesWeld);
+    allScrapReasonNames.forEach(function(name) {
       var ci = findCol(name);
       if (ci >= 0) scrapReasonCols[name] = ci;
     });
@@ -8824,7 +9266,12 @@ function parseXLSXData(arrayBuffer, filename) {
         if (s.length > 10 && s.indexOf('GMT') >= 0) return '';
         return s;
       })();
-      var productCodeVal = String(getVal(cols.productCode) || '').trim();
+      // === 2026-09-02 产品代号大小写归一化 ===
+      // 员工手写 W 字母时大小写乱写（W05 vs w05）会导致下游所有按 r.pc 做 key
+      // 的聚合（renderProductScrapChart / 产品下拉 / 多选过滤等）拆成两条独立柱。
+      // 在 parseXLSXData 入口归一化为 trim().toUpperCase()，下游不动。
+      // 产品名称（r.product）保留原样，因为它是人读字段，员工可写"高强板"等有意义的名称。
+      var productCodeVal = String(getVal(cols.productCode) || '').trim().toUpperCase();
       var productVal = String(getVal(cols.product) || '').trim();
       var cycleTimeVal = nval(getVal(cols.cycleTime));
       var unitCycleVal = nval(getVal(cols.unitCycle));
@@ -8837,9 +9284,40 @@ function parseXLSXData(arrayBuffer, filename) {
       var lineVal = lineFromCol || autoLine;
 
       var scrapReasons = {};
+      var usedCi = {};  // 已被识别（cols + scrapReasonCols）的列索引
+      Object.keys(cols).forEach(function(k) {
+        var ci = cols[k];
+        if (typeof ci === 'number' && ci >= 0) usedCi[ci] = k;
+      });
       for (var sn in scrapReasonCols) {
         var v = nval(getVal(scrapReasonCols[sn]));
         if (v > 0) scrapReasons[sn] = v;
+        usedCi[scrapReasonCols[sn]] = sn;
+      }
+      // 未识别的数字明细列：列名不在 35 个标准列表里，但有数字（>0），
+      // 一律归到 scrap_reasons 兜底，键名用实际列头文本（让饼图立刻显示全部分类）
+      // 黑名单：含这些关键词的列**绝对不是**报废明细（如"开始时间""结束时间""理论加工时间"等时间字段）
+      var NOT_SCRAP_KW = /时间|时长|时数|时刻|日期|代码|名称|员工|工号|负责人|计划|班次|班别|备注|说明|操作|总计|合计|小计|总和|开始|结束|起始|终止|耗时|工时|号机|机台|设备|生产线|带班|检验|判定|审核|录入|工位|工序|min$|hr$|hour$|分钟|秒钟|秒数|节拍|周期|理论|实际|目标|合格|报废率|合格率/;
+      var unmatchedReasons = {};
+      for (var h in colMap) {
+        var ci2 = colMap[h];
+        if (typeof ci2 !== 'number' || ci2 < 0) continue;
+        if (usedCi[ci2]) continue;
+        // 排除派生字段：列头含"率"/"比"/"百分比" → 不是计数明细
+        if (/率|比|百分比|%/.test(h)) continue;
+        // 排除时间/日期/代码/名称等已知非报废明细的列
+        if (NOT_SCRAP_KW.test(h)) continue;
+        var v2 = nval(getVal(ci2));
+        if (v2 > 0) unmatchedReasons[h] = v2;
+      }
+      // 合并：标准列名优先（matched 覆盖 unmatched 同名）
+      var mergedReasons = Object.assign({}, unmatchedReasons, scrapReasons);
+      // 调试：仅第 1 行打印 13 列匹配情况，便于诊断 souring2 这类焊接产线
+      if (r === headerRow + 1) {
+        console.log('【xlsx解析】报废分类列匹配：');
+        console.log('  已匹配 (' + Object.keys(scrapReasonCols).length + ' 个):', Object.keys(scrapReasonCols));
+        console.log('  未匹配 (' + (allScrapReasonNames.length - Object.keys(scrapReasonCols).length) + ' 个):',
+          allScrapReasonNames.filter(function(n) { return !(n in scrapReasonCols); }));
       }
 
       // emitRec: 多切位文件传入 prodParts/prodRankIdx 调用 fairShare 公平分摊 (Σ = 原值)
@@ -8884,10 +9362,26 @@ function parseXLSXData(arrayBuffer, filename) {
           leader: leaderVal
         };
         if (chamber) rec2.chamber = chamber;
-        if (Object.keys(scrapReasons).length && totalP > 0) {
+        // 挂载 scrap_reasons：不再依赖 totalP > 0（用户可能只填明细不填产出）
+        // 缩放系数：优先用 totalVal/okVal，否则用明细总和，最后退 1
+        if (Object.keys(mergedReasons).length) {
           var sr2 = {};
-          for (var kn in scrapReasons) sr2[kn] = scrapReasons[kn] * (totalP / (totalVal || 1));
+          // 取分摊基数：try totalVal → okVal → scrapReasons总和 → 1
+          var baseForScale = (totalVal > 0) ? totalVal
+                            : (okVal > 0) ? okVal
+                            : (function(){ var s=0; for(var xx in mergedReasons) s+=num(mergedReasons[xx]); return s>0?s:1; })();
+          for (var kn in mergedReasons) sr2[kn] = mergedReasons[kn] * (totalP > 0 ? (totalP / baseForScale) : (1));
           rec2.scrap_reasons = sr2;
+        }
+        // 兜底 1：scrap=0 但 scrap_reasons 有数据时，用明细总和作为报废数（用户可能只填明细不填总数）
+        if ((prodShareOrNull !== null && prodShareOrNull !== undefined && prodShareOrNull !== 0)
+            && !rec2.scrap && rec2.scrap_reasons) {
+          var sTotal = 0;
+          for (var kk in rec2.scrap_reasons) sTotal += num(rec2.scrap_reasons[kk]);
+          if (sTotal > 0) {
+            rec2.scrap = Math.round(sTotal);
+            if (!rec2.rj) rec2.rj = rec2.scrap;
+          }
         }
         records.push(rec2);
       }
@@ -8929,9 +9423,19 @@ function parseXLSXData(arrayBuffer, filename) {
         var status = String(getVal(cols.status) || '').trim();
         if (!status) continue;
         emitRec(null, status, 1);
-        if (Object.keys(scrapReasons).length) {
-          // 复制 scrap_reasons 到刚 push 的最后一条
-          records[records.length - 1].scrap_reasons = scrapReasons;
+        if (Object.keys(mergedReasons).length) {
+          // 复制合并后的 scrap_reasons（含标准列名 + 未识别的数字明细列）到刚 push 的最后一条
+          records[records.length - 1].scrap_reasons = mergedReasons;
+        }
+        // 兜底：scrap=0 但 scrap_reasons 有数据时，用明细总和作为报废数（用户可能只填明细不填总数）
+        var lastRec = records[records.length - 1];
+        if (lastRec && !lastRec.scrap && lastRec.scrap_reasons) {
+          var sTotal2 = 0;
+          for (var kk2 in lastRec.scrap_reasons) sTotal2 += num(lastRec.scrap_reasons[kk2]);
+          if (sTotal2 > 0) {
+            lastRec.scrap = Math.round(sTotal2);
+            if (!lastRec.rj) lastRec.rj = lastRec.scrap;
+          }
         }
       }
     }
@@ -8945,6 +9449,84 @@ function parseXLSXData(arrayBuffer, filename) {
       for (var h in colMap) { if (colMap[h] === ci) { fieldMap[k] = h; break; } }
     }
   });
+
+  // 保存最近一次解析的表头到 window + localStorage，供诊断按钮读取（key = 产线||文件名）
+  try {
+    var saveLine = lineVal || autoLine || (filename || 'unknown');
+    var saveKey = saveLine + '||' + (filename || 'unknown');
+    var infoObj = {
+      line: saveLine,
+      filename: filename || '',
+      headerRow: headerRow,
+      headers: (headers || []).slice(),
+      matchedKeys: Object.keys(scrapReasonCols),
+      unmatchedNames: allScrapReasonNames.filter(function(n){ return !(n in scrapReasonCols); }),
+      ts: Date.now()
+    };
+    window.__LAST_PARSE_INFO__ = window.__LAST_PARSE_INFO__ || {};
+    window.__LAST_PARSE_INFO__[saveKey] = infoObj;
+    // 持久化到 localStorage（让刷新页面后诊断按钮仍能看到上次的表头，避免"网页打开后就没了"）
+    try {
+      var persist = {};
+      Object.keys(window.__LAST_PARSE_INFO__).forEach(function(k){ persist[k] = window.__LAST_PARSE_INFO__[k]; });
+      localStorage.setItem('__LAST_PARSE_INFO__', JSON.stringify(persist));
+    } catch(ee){}
+  } catch(e){}
+
+  // === 🆕 2026-09-02 X-AJ 跨行聚合修复 ===
+  // 用户 xlsx 里 X-AJ 标准分类常填在"计划停机/故障中断"注释行（L=0），
+  // 真正的报废数（L>0）填在"实际生产时间"行。两个相邻行属于同一班次，
+  // X-AJ 是该班的"分类明细"。dashboard 必须按 (日期+班次) 把 X-AJ 汇总到产出行上，
+  // 否则饼图看到的"未分类 100%"——因为 getCurrentScrapList 只看产出行 L，X-AJ 在非产出行被跳过。
+  try {
+    var byKey = {};
+    records.forEach(function(r) {
+      var k = (r.sd || r.date || '') + '|' + (r.shift || '') + '|' + (r.line || '');
+      if (!byKey[k]) byKey[k] = { prod: [], allXaj: {}, totalL: 0 };
+      var g = byKey[k];
+      if (typeof isProdTime === 'function' && isProdTime(r.status)) {
+        g.prod.push(r);
+        g.totalL += num(r.scrap);
+      }
+      if (r.scrap_reasons) {
+        for (var kn in r.scrap_reasons) {
+          var v = num(r.scrap_reasons[kn]);
+          if (v > 0) g.allXaj[kn] = (g.allXaj[kn] || 0) + v;
+        }
+      }
+    });
+    var reassignedKeys = 0;
+    var reassignedTotal = 0;
+    Object.keys(byKey).forEach(function(k) {
+      var g = byKey[k];
+      var hasXaj = Object.keys(g.allXaj).length > 0;
+      // 没产出行：有 X-AJ 但没产出行，X-AJ 仍按原记录保留（不丢失数据）
+      if (g.prod.length === 0) return;
+      // 产出行无 X-AJ、组内也找不到 X-AJ → 不做修正
+      if (!hasXaj) return;
+      // 产出行有 L，但组内也有 X-AJ → 把 X-AJ 按 L 加权分摊给产出行，**全部** 替换原 scrap_reasons
+      // 1) 累计组内 X-AJ 总值
+      var xajSum = 0;
+      for (var kk in g.allXaj) xajSum += g.allXaj[kk];
+      if (xajSum <= 0) return;
+      // 2) 累计组内 L 总值（产出行）
+      var lSum = g.totalL > 0 ? g.totalL : xajSum;  // 若所有产出行 L=0，用 X-AJ 总和做权重
+      g.prod.forEach(function(p) {
+        var lRatio = g.totalL > 0 ? (num(p.scrap) / lSum) : (1 / g.prod.length);
+        var newReasons = {};
+        for (var xk in g.allXaj) {
+          newReasons[xk] = g.allXaj[xk] * lRatio;
+        }
+        // 完全替换原 scrap_reasons（X-AJ 是该班的"分类明细"，原记录可能只是部分明细）
+        p.scrap_reasons = newReasons;
+        reassignedKeys++;
+        for (var kkk in newReasons) reassignedTotal += newReasons[kkk];
+      });
+    });
+    if (reassignedKeys > 0) {
+      console.log('[xaj-group-merge] 按 (日期+班次) 把 X-AJ 重新分摊到 ' + reassignedKeys + ' 条产出行（累加 ' + reassignedTotal.toFixed(1) + ' 片）');
+    }
+  } catch(eMerge) { try { console.warn('[xaj-group-merge]', eMerge); } catch(ev){} }
 
   return {
     records: records,
