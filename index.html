@@ -44,6 +44,8 @@ select:focus,input:focus{outline:none;border-color:#2563eb}
 .chart-card{background:#fff;border:1px solid #d0d8e0;border-radius:10px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
 .chart-card.wide{grid-column:span 2}
 @media(max-width:900px){.chart-card.wide{grid-column:span 1}}
+.scrap-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;grid-column:1/-1}
+@media(max-width:900px){.scrap-row{grid-template-columns:1fr}}
 .chart-title{font-size:13px;color:#3a4a5e;margin-bottom:12px;font-weight:600;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .chart-title > span:first-child{flex-shrink:0}
 .ds-toggle-group{margin-left:auto;display:flex;gap:5px;align-items:center;flex-wrap:wrap}
@@ -54,7 +56,7 @@ select:focus,input:focus{outline:none;border-color:#2563eb}
 .ds-toggle-all{font-size:13px;padding:3px 8px;border-radius:14px;border:1.5px solid #5a6c80;background:#fff;color:#5a6c80;cursor:pointer;line-height:1.2;transition:all .15s}
 .ds-toggle-all:hover{background:#f0f4f8}
 .chart-wrap{position:relative;height:220px}
-.chart-wrap.tall{height:320px}
+.chart-wrap.tall{height:240px}
 .chart-wrap.medium{height:280px}
 .downtime-section{padding:0 24px 16px}
 .downtime-section .chart-card{margin-bottom:0}
@@ -813,7 +815,8 @@ body.reason-dragging-body{cursor:grabbing!important}
     </div>
     <div class="chart-wrap"><canvas id="chartProduct"></canvas></div>
   </div>
-  <div class="chart-card wide">
+  <div class="scrap-row">
+  <div class="chart-card">
     <div class="chart-title">
       报废原因分布及占比
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
@@ -825,7 +828,7 @@ body.reason-dragging-body{cursor:grabbing!important}
     </div>
     <div class="chart-wrap tall"><canvas id="chartScrap"></canvas></div>
   </div>
-  <div class="chart-card wide">
+  <div class="chart-card">
     <div class="chart-title">
       <span>📦 产品级报废率（按当前日期）</span>
       <span style="font-size:11px;color:#8a9bb0;font-weight:400">（按产线分组，每个产线一张柱状图；超过目标值标红）</span>
@@ -845,6 +848,7 @@ body.reason-dragging-body{cursor:grabbing!important}
       </div>
     </div>
     <div id="productScrapGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;margin-top:6px"></div>
+  </div>
   </div>
   <div class="chart-card wide">
     <div class="chart-title">
@@ -1282,10 +1286,10 @@ body.reason-dragging-body{cursor:grabbing!important}
 <div class="modal-overlay" id="feishuSyncModal">
   <div class="modal" style="max-width:560px">
     <h3>☁️ 同步飞书在线表格</h3>
-    <p style="font-size:12px;color:#5a6c80">从飞书「在线电子表格 Sheet」自动拉取数据，无需手动导出。需先部署飞书代理（详见对话说明），并把下方配置填好。配置存于本机浏览器，刷新不丢失。</p>
+    <p style="font-size:12px;color:#5a6c80">从飞书「在线电子表格 Sheet」自动拉取数据，无需手动导出。需先部署飞书代理（详见 feishu-proxy/README.md），并把下方配置填好。配置存于本机浏览器，刷新不丢失。<br><b style="color:#b45309">代理地址请填 Cloudflare 自定义域名（如 https://sync.你的域名.com），不要填 *.workers.dev —— 公司网常拦截 workers.dev。</b></p>
     <div style="display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin-top:10px">
       <label style="font-size:13px;color:#3a4a5e">代理地址</label>
-      <input type="text" id="feishuProxyUrl" placeholder="https://xxx.workers.dev/sync" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">
+      <input type="text" id="feishuProxyUrl" placeholder="https://sync.你的域名.com（Cloudflare 自定义域名，勿用 workers.dev）" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">
       <label style="font-size:13px;color:#3a4a5e">表格 Token</label>
       <input type="text" id="feishuSheetToken" placeholder="从飞书 Sheet 链接里提取（sheet/ 之后那段）" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">
       <label style="font-size:13px;color:#3a4a5e">子表 ID</label>
@@ -5077,7 +5081,7 @@ function renderProductScrapChart(data) {
     var card = document.createElement('div');
     card.style.cssText = 'background:#f8fafc;border:1px solid #d0d8e0;border-radius:8px;padding:10px 12px';
     // 高度按产品数自适应：每个产品 26px + 标题/边距
-    var canvasH = Math.max(80, items.length * 26 + 28);
+    var canvasH = Math.max(72, items.length * 22 + 16);
     var badCount = items.filter(function(it) { return it.rate > target; }).length;
     var titleColor = badCount > 0 ? '#dc2626' : '#16a34a';
     card.innerHTML =
