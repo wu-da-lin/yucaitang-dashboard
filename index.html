@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<!-- v6 2026-09-03 14:30: renderScrapChart 放开 status 过滤，所有 X-AJ 明细计入饼图 -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>生产数据看板</title>
@@ -562,6 +566,8 @@ body.reason-dragging-body{cursor:grabbing!important}
     <button class="btn btn-secondary" onclick="syncToGitHub()" title="把当前数据推送到 GitHub 仓库，同事刷新即见（需先点⚙️同步设置 Token）">🔄 同步数据</button>
     <button class="btn btn-secondary" onclick="syncUiFromFile()" title="选择本地最新的 index.html 推送到 GitHub（用于界面调整后同步）" style="color:#7c3aed;border-color:#c4b5fd">🆕 同步界面</button>
     <button class="btn btn-secondary" onclick="setSyncToken()" title="设置 GitHub Token（仅本机浏览器保存，不上传）">⚙️ 同步设置</button>
+    <button class="btn btn-secondary" onclick="fixProductClassify()" title="新松/souring 老 IndexedDB 数据如出现产品归类错（如把'小米-KUN30-顶盖横梁-V3凸起'单独成柱），点此自愈 + 引导重新上传 xlsx" style="border-color:#fcd34d;color:#b45309">🔧 修复产品归类</button>
+    <button class="btn btn-secondary" onclick="clearXinDirtyData()" title="终极兜底：直接删除当前浏览器所有 line=新松 records，让用户重新上传新松 xlsx 覆盖" style="border-color:#fbbf24;color:#92400e">🗑️ 清空新松老数据</button>
     <button class="btn btn-secondary" onclick="clearAllData()" style="border-color:#fca5a5;color:#dc2626">清空数据</button>
   </div>
 </div>
@@ -1663,6 +1669,82 @@ function seedLineProfiles(lines) {
   saveLineProfiles();
 }
 
+// === 2026-09-03 新增：产品短码抽取 helper ===
+// 老 IndexedDB 数据里 product 字段可能被错存为 pc 长描述，导致归一算法把
+// 「小米-KUN30-顶盖横梁-V3凸起」这种字符串当成产品 key 单独成柱。
+// 这里提供一个有限规则集：从 pc 长描述里抽一个"最可能"的产品短码，
+// 用作 product 字段的兜底覆盖。注意：精确匹配 KUN30ABC 时 pc 里必须含
+// "KUN\d{2}[A-Z]+"连续（如"小米-KUN30-ABC..." → KUN30ABC）。
+// 抽不到的（如 KUN30 没有 ABC 后缀）退到 KUN30 — 比长描述单列好。
+// 边界判定：手动检测前后是否为非字母数字（中文/空格/标点都算边界）。
+function extractShortProductCode(s) {
+  if (!s) return '';
+  var up = String(s).toUpperCase();
+  function isBoundary(ch) { return !ch || !/[A-Z0-9]/.test(ch); }
+  function tryMatch(pattern) {
+    var re = new RegExp(pattern.source, 'g');
+    var m;
+    while ((m = re.exec(up)) !== null) {
+      var idx = m.index;
+      var found = m[1];
+      var before = idx > 0 ? up.charAt(idx - 1) : '';
+      var after = idx + m[0].length < up.length ? up.charAt(idx + m[0].length) : '';
+      if (isBoundary(before) && isBoundary(after)) return found;
+    }
+    return '';
+  }
+  // KUN\d{2}[A-Z]+：连续 KUN + 2数字 + 1+大写字母（KUN30ABC / KUN30AB / KUN10ABC / KUN10AB）
+  var r1 = tryMatch(/(KUN\d{2}[A-Z]+)/);
+  if (r1) return r1;
+  // KUN\d{2}：单独 KUN + 2数字（pc 没写 ABC 后缀时退一级，如"小米-KUN30-..."）
+  var r2 = tryMatch(/(KUN\d{2})/);
+  if (r2) return r2;
+  // H\d{2,3}：H56 / H66 / H77 / H37 / H33（前后是中文/标点也算边界）
+  var r3 = tryMatch(/(H\d{2,3})/);
+  if (r3) return r3;
+  // EX1H / DH1 / S73 / MS\d{2,3}
+  var r4 = tryMatch(/(EX1H|DH1|S73|MS\d{2,3})/);
+  if (r4) return r4;
+  // W0\d：W04 / W05
+  var r5 = tryMatch(/(W0\d)/);
+  if (r5) return r5;
+  return '';
+}
+
+// === 2026-09-03 报废明细重复键自愈（配合 findCol 一列一键修复）===
+// 旧解析器因 findCol 模糊匹配，会把同一 xlsx 列（如『取样/断焊』）同时读成多个候选键
+// （'取样/断焊' + '取样'），各键值相同 → 经 SC_ALIAS 归一后求和翻倍。
+// 本函数在每次 rebuildRawData 时扫描 scrap_reasons：
+//   - 按 SC_ALIAS 归一到 canonical 分组；
+//   - 若同组内多个键"值完全相同" → 判定为同一列被读多次，只保留首个键，其余删除（消除翻倍）；
+//   - 若同组内各键值不同 → 视为不同缺陷列被正确归类（如『变形』与『划伤』），保留求和（原设计）。
+function healScrapReasonsDup(sr) {
+  if (!sr || typeof sr !== 'object') return;
+  var ALIAS = (typeof window.SC_ALIAS !== 'undefined') ? window.SC_ALIAS : {};
+  var groups = {};
+  for (var k in sr) {
+    if (!sr.hasOwnProperty(k)) continue;
+    var v = sr[k];
+    if (typeof v !== 'number' || isNaN(v)) continue;
+    var canon = (ALIAS && ALIAS[k]) ? ALIAS[k] : k;
+    if (!groups[canon]) groups[canon] = [];
+    groups[canon].push({ k: k, v: v });
+  }
+  for (var c in groups) {
+    var arr = groups[c];
+    if (arr.length <= 1) continue;
+    // 检测 findCol 重复读取：所有键值完全相同
+    var first = arr[0].v;
+    var allSame = true;
+    for (var i = 1; i < arr.length; i++) { if (arr[i].v !== first) { allSame = false; break; } }
+    if (allSame) {
+      // 同一列被读多次 → 只保留首个键，删除其余（值不累加）
+      for (var j = 1; j < arr.length; j++) { delete sr[arr[j].k]; }
+    }
+    // 否则：不同列归并（保留求和），不处理
+  }
+}
+
 function rebuildRawData() {
   RAW_DATA = [];
   var totalDropped = 0;
@@ -1674,10 +1756,46 @@ function rebuildRawData() {
     // === 2026-09-02 产品代号大小写归一化（修复 W05 vs w05 双柱 bug）===
     // 员工手写 W 字母时大小写乱写，IndexedDB 缓存里两个键都被同时保留。
     // 在 rebuildRawData 统一入口兜底，新老数据一次合并。
+    var pcFixedCount = 0;
+    var dirtyXinCount = 0;
     clean.forEach(function(r) {
       if (r.pc) r.pc = String(r.pc).trim().toUpperCase();
-      if (r.product) r.product = String(r.product).trim();
+      if (r.product) {
+        var p = String(r.product).trim();
+        var pcStr = r.pc ? String(r.pc).trim() : '';
+        // === 2026-09-03 新松老错存 product 自愈 ===
+        // 新松 xlsx 的 pc 列填"产品长描述+缺陷后缀"（如"小米-KUN30-顶盖横梁-V3凸起"）、
+        // pn 列填干净短码（如"KUN30ABC"）。老 parseXLSXData 时期 product 字段被错存为
+        // pc 长描述，导致 renderProductScrapChart 归一时把长描述单独成柱。
+        // 检测条件：product 字段值 ≥6 字符 + 含中文或斜杠（典型 pc 长描述特征），
+        // 且不等于 pc 字段值 → 视为错存。
+        // 修复策略：尝试从 pc 抽取已知产品短码（KUN30ABC/H56/W04 等）覆盖 product，
+        // 抽不到则清空 product（让归一 key fallback 到 pc，但 result 是用户已知数据保留）。
+        var isLongDesc = (p.length >= 6 && /[\u4e00-\u9fa5\/]/.test(p));
+        if (isLongDesc) {
+          // v4 策略：抽到短码覆盖；抽不到 → 保留原 product 不动（绝不清空，否则 renderProductScrapChart
+          // 走 r.product||r.pc 兜底到长描述，反而让兜底抽取也没机会生效）
+          var recovered = extractShortProductCode(pcStr || p);
+          if (recovered) r.product = recovered;
+          // 给新松老错存 record 打 marker → renderScrapChart 见到会清零 scrap_reasons（修复饼图4类假数据）
+          if (r.line === '新松') { r.__xin_dirty = true; dirtyXinCount++; }
+          pcFixedCount++;
+        } else {
+          r.product = p;
+        }
+      } else if (!p && pcStr) {
+        // 新松 pn 列空的情况（pn 字段在 xlsx 是 product 列）：从 pc 抽短码填充
+        var rec2 = extractShortProductCode(pcStr);
+        if (rec2) {
+          r.product = rec2;
+          pcFixedCount++;
+        }
+      }
+      // === 2026-09-03 报废明细重复键自愈（findCol 模糊匹配导致的翻倍）===
+      healScrapReasonsDup(r.scrap_reasons);
     });
+    if (pcFixedCount > 0) console.log('[rebuildRawData] 修正错存 product 字段 ' + pcFixedCount + ' 条（多为新松老 IndexedDB 数据）');
+    if (dirtyXinCount > 0) console.log('[rebuildRawData] 标记新松老错存 records: ' + dirtyXinCount + ' 条（带 __xin_dirty 标志，renderScrapChart 将清零其 scrap_reasons）');
     ds.records = clean.map(function(r) { r.line = String(r.line).trim(); return r; });
     // 重算该数据集的 lines 集合
     var lineSet = {};
@@ -1687,6 +1805,129 @@ function rebuildRawData() {
     RAW_DATA = RAW_DATA.concat(clean);
   });
   if (totalDropped > 0) console.log('[rebuildRawData] 剔除 line 无效脏记录 ' + totalDropped + ' 条');
+  // v5: rebuildRawData 修了 ds.records 里的 product 字段（去掉 pc 长描述），
+  // 必须持久化到 IndexedDB，否则下次刷新又从 IndexedDB 反序列化出老错存 records。
+  if (typeof persistAllDatasets === 'function') {
+    try { persistAllDatasets(); } catch (e) { console.warn('[rebuildRawData] 持久化失败:', e); }
+  }
+}
+
+// === 2026-09-03 新增：产品归类自愈函数（用户主动触发） ===
+// 场景：新松老 IndexedDB 数据中 product 字段被错存为 pc 长描述（"小米-KUN30-顶盖横梁-V3凸起"），
+// 导致 renderProductScrapChart 把长描述单独成柱。
+// rebuildRawData 已自动从 pc 抽取短码兜底（覆盖大部分情况），但对于"pc 里只有 KUN30 没有 ABC"的情况
+// 仍无法精确归并。本函数做深度清理：
+//   1. 扫描 ALL_DATASETS，删除 line==='新松' 且 product 是长描述的 records（删除前备份统计）
+//   2. 让用户立刻点"上传数据文件"重新传新松 xlsx，IndexedDB 被新版 parseXLSXData 覆盖，
+//      归一时 r.product 字段直接是干净的 KUN30ABC 短码，完美归并。
+//   3. 同步执行 rebuildRawData() 刷新当前显示。
+async function fixProductClassify() {
+  // 1) 扫描 + 报告
+  var stats = { totalXin: 0, badXinRecords: 0, sampleBad: [] };
+  ALL_DATASETS.forEach(function(ds) {
+    if (!ds || !ds.records) return;
+    ds.records.forEach(function(r) {
+      if (!r || r.line !== '新松') return;
+      stats.totalXin++;
+      var p = String(r.product || '').trim();
+      var isLongDesc = (p.length >= 6 && /[\u4e00-\u9fa5\/]/.test(p));
+      if (isLongDesc) {
+        stats.badXinRecords++;
+        if (stats.sampleBad.length < 3) {
+          stats.sampleBad.push({sd: r.sd, pc: r.pc, product: r.product});
+        }
+      }
+    });
+  });
+  // 2) 自动修复（不删记录，只修正 product 字段——已通过 rebuildRawData 完成）
+  // 这里再做一次 rebuildRawData 让 console.log 信息最新
+  rebuildRawData();
+
+  if (stats.badXinRecords === 0) {
+    alert('未发现需要修复的新松产品归类错存记录。\n\n如新松柱状图仍有异常（如长描述单列），可能是 IndexedDB 里的数据过于陈旧。请点「📤 上传数据文件」上传最新「新松生产记录表.xlsm」覆盖。');
+    // 主动触发上传入口
+    if (typeof showUploadModal === 'function') showUploadModal();
+    return;
+  }
+
+  // 3) 有错存记录 → 询问用户
+  var sampleTxt = stats.sampleBad.map(function(r) {
+    return '  ' + (r.sd || '—') + ' · pc=' + r.pc + ' · product=' + r.product;
+  }).join('\n');
+  var msg = '检测到新松 ' + stats.badXinRecords + ' / ' + stats.totalXin + ' 条产品归类错存记录（product 字段被错存为 pc 长描述）。\n\n' +
+            '已尝试用 pc 抽取短码自动修复，请查看浏览器 DevTools Console 的 [rebuildRawData] 日志。\n\n' +
+            '样例:\n' + sampleTxt + '\n\n' +
+            '精确归并建议：上传最新「新松生产记录表.xlsm」（点「📤 上传数据文件」），系统会用新版 parseXLSXData 把 product 字段写为干净的 KUN30ABC 短码。\n\n' +
+            '是否现在打开上传窗口？';
+  if (window.confirm(msg)) {
+    if (typeof showUploadModal === 'function') showUploadModal();
+  } else {
+    alert('跳过上传。自动修复已生效，请刷新页面查看新松柱状图。');
+  }
+}
+
+
+// === 2026-09-03 v4 终极兜底按钮：一键清空新松错存 records + 引导重传 ===
+async function clearXinDirtyData() {
+  var xinCount = ALL_DATASETS.reduce(function(s, ds) {
+    return s + (ds && ds.records ? ds.records.filter(function(r) { return r && r.line === '新松'; }).length : 0);
+  }, 0);
+  if (!confirm('终极操作：将删除当前浏览器 IndexedDB 中所有 line=新松 的 records（共 ' + xinCount + ' 条）。\n\n仅删除当前浏览器本地数据，不影响其他产线和 GitHub 仓库。\n\n确认后请立刻上传新松生产记录表.xlsm 覆盖。\n\n继续？')) return;
+  var totalDeleted = 0;
+  ALL_DATASETS.forEach(function(ds) {
+    if (!ds || !ds.records) return;
+    var before = ds.records.length;
+    ds.records = ds.records.filter(function(r) { return r && r.line !== '新松'; });
+    totalDeleted += before - ds.records.length;
+    var lineSet = {};
+    ds.records.forEach(function(r) { if (r.line) lineSet[r.line] = true; });
+    ds.lines = Object.keys(lineSet);
+  });
+  if (typeof saveToIndexedDB === 'function') await saveToIndexedDB();
+  rebuildRawData();
+  console.log('[clearXinDirtyData] 删除新松老错存 records ' + totalDeleted + ' 条，已同步 IndexedDB。请立刻上传新松生产记录表.xlsm。');
+  alert('已删除新松 ' + totalDeleted + ' 条老错存 records。\n\n下一步：点击「上传数据文件」上传「新松生产记录表.xlsm」覆盖当前数据。\n\n新版 parseXLSXData 会把 product 字段写为干净的 KUN30ABC 短码。');
+  if (typeof showUploadModal === 'function') showUploadModal();
+}
+
+
+
+// v5 新增：一键强制修复 + 持久化
+async function forceRebuildAndPersist() {
+  console.log('[v6] forceRebuildAndPersist 开始强制修复 + 全量重渲染...');
+  if (typeof rebuildRawData !== 'function') {
+    alert('rebuildRawData 函数未加载，请刷新浏览器（Ctrl+Shift+R）重试');
+    return;
+  }
+  // (1) 清 SCRAP_FILTER 白名单 → 让 renderScrapChart 自动重建
+  try {
+    SCRAP_FILTER = null;
+    localStorage.removeItem('SCRAP_FILTER');
+    console.log('[v6] SCRAP_FILTER 已清空');
+  } catch (e) {}
+  // (2) 跑 rebuildRawData 自愈 records（新松老错存 product 字段修正 + __xin_dirty 标记）
+  rebuildRawData();
+  // (3) 持久化到 IndexedDB
+  if (typeof persistAllDatasets === 'function') {
+    try {
+      await persistAllDatasets();
+      console.log('[v6] IndexedDB 持久化完成');
+    } catch (e) {
+      console.warn('[v6] 持久化失败：', e);
+    }
+  }
+  // (4) 重渲染所有图表（v6 后 renderScrapChart 不再 filter status）
+  try {
+    var data = (typeof getFilteredData === 'function') ? getFilteredData() : (window.RAW_DATA || []);
+    if (typeof renderScrapChart === 'function') renderScrapChart(data);
+    if (typeof renderProductScrapChart === 'function') renderProductScrapChart(data);
+    if (typeof renderKpis === 'function') renderKpis(data);
+    if (typeof renderAugClassDetail === 'function') renderAugClassDetail('scrapDiagnoseContent');
+    console.log('[v6] 图表重渲染完成');
+  } catch (e) {
+    console.warn('[v6] 渲染失败：', e);
+  }
+  alert('v6 强制修复完成！\n\n已执行：\n1) 清 SCRAP_FILTER 白名单\n2) rebuildRawData 修正 records\n3) persistAllDatasets 持久化到 IndexedDB\n4) 重渲染报废饼图/产品柱图/KPI/诊断面板\n\nv6 renderScrapChart 不再 filter status=实际生产时间，所有 X-AJ 明细都计入饼图。\n\n如果仍然看到 4 类异常（多了未分类/未焊透），请点「🗑️ 清空新松老数据」按钮彻底清缓存后重新上传 xlsx。');
 }
 
 // 判断 line 字段是否是有效产线名（非空、剥离空白与标点后长度 ≥ 2）
@@ -2333,12 +2574,14 @@ function getCurrentScrapList() {
 //   5) 末尾主动 forceResyncScrapFilter，确保饼图自动展开全部 6 类
 
 window.SC_ALIAS = window.SC_ALIAS || {
-  '取样/断煚': '取样',
+  '取样/断焊': '取样/断焊',  // v6.5: 保留原列名
+  '取样': '取样/断焊',  // v6.5: 老解析器的取样归切
   '取样/压斜': '取样/压斜',
   '板料变形/划伤': '板料变形/划伤',
   '变形': '板料变形/划伤',
   '划伤': '板料变形/划伤',
-  '未焚透': '未穿透'
+  '未焊透': '未焊透',  // v6.5: 修错字（原未焚）
+  '未穿透': '未焊透'  // v6.5: 旧别名归切
 };
 
 function renderAugClassDetail(targetId) {
@@ -2348,11 +2591,19 @@ function renderAugClassDetail(targetId) {
   if (!recs.length) return;
   var line = (typeof currentLine !== 'undefined' && currentLine) ? currentLine : 'all';
   var lineData = (line === 'all') ? recs : recs.filter(function(r){ return r.line === line; });
+  // v6.5 (2026-09-03): 标题月份跟随日期筛选器，而不是数据最新月 —— 避免用户选 8月却显示 2026-09
+  var dStart = (document.getElementById('dateStart') || {}).value || '';
+  var dEnd = (document.getElementById('dateEnd') || {}).value || '';
   var maxMonth = '';
-  for (var i = 0; i < lineData.length; i++) {
-    var sd = lineData[i].sd || lineData[i].date || '';
-    var m = sd.substring(0, 7);
-    if (/^\d{4}-\d{2}$/.test(m) && m > (maxMonth || '0000-00')) maxMonth = m;
+  if (dStart && /^\d{4}-\d{2}-\d{2}$/.test(dStart)) maxMonth = dStart.substring(0, 7);
+  else if (dEnd && /^\d{4}-\d{2}-\d{2}$/.test(dEnd)) maxMonth = dEnd.substring(0, 7);
+  if (!maxMonth) {
+    // 没设筛选器：取数据最新月（保留旧行为）
+    for (var i = 0; i < lineData.length; i++) {
+      var sd = lineData[i].sd || lineData[i].date || '';
+      var m = sd.substring(0, 7);
+      if (/^\d{4}-\d{2}$/.test(m) && m > (maxMonth || '0000-00')) maxMonth = m;
+    }
   }
   if (!maxMonth) return;
   var monthData = lineData.filter(function(r){
@@ -5100,42 +5351,42 @@ function renderProductChart(data) {
 function renderScrapChart(data) {
   destroyChart('chartScrap');
   var scrapMap = {};
-  // 别名归一化：把历史上可能重复的多个键名合并到一个规范名（避免「取样 vs 取样/断焊」「变形 vs 划伤 vs 板料变形/划伤」这种多键同数据问题）
+  // 别名归一化：把历史上可能重复的多个键名合并到一个规范名（避免「变形 vs 划伤 vs 板料变形/划伤」这种多键同数据问题）
+  // 注意：'取样/断焊' 与 '取样' 同义问题已通过 v6.5 拆分解决 —— 保留 xlsx 原列名「取样/断焊」，让饼图与透视表标签完全一致
   var ALIAS = {
-    '取样/断焊': '取样',           // 老解析器 → 新解析器都归 "取样"
     '取样/压斜': '取样/压斜',      // 保留
     '板料变形/划伤': '板料变形/划伤', // 保留（统一用此名）
     '变形': '板料变形/划伤',        // 老解析器 → "板料变形/划伤"
     '划伤': '板料变形/划伤',        // 老解析器 → "板料变形/划伤"
-    '未焊透': '未穿透'              // 老名字"未焊透"也归并到"未穿透"（你 xlsx 实际叫"未穿透"）
+    '未焊透': '未焊透',              // 保留原列名，与 xlsx 透视表标签一致
+    '取样/断焊': '取样/断焊',        // v6.5 拆分：保留 xlsx 原列名，不再归到"取样"
+    '取样': '取样/断焊'              // v6.5 拆分：老解析器的"取样"也归到"取样/断焊"
   };
   function normKey(k) { return ALIAS[k] || k; }
   data.forEach(function(r) {
-    if (!isProdTime(r.status)) return;
     var scrap = num(r.scrap);
-    // 13列明细按比例缩放到 scrap 总量（解决 Excel 录入不一致），保证饼图总和 = 报废总数
-    if (r.scrap_reasons) {
-      var s13 = 0;
-      for (var k in r.scrap_reasons) s13 += num(r.scrap_reasons[k]);
-      if (s13 > 0 && scrap > 0) {
-        var ratio = scrap / s13;
-        for (var k2 in r.scrap_reasons) {
-          var v = num(r.scrap_reasons[k2]);
-          if (v > 0) {
-            var nk = normKey(k2);
-            if (!scrapMap[nk]) scrapMap[nk] = 0;
-            scrapMap[nk] += v * ratio;
-          }
-        }
-      } else if (s13 === 0 && scrap > 0) {
-        if (!scrapMap[UNCAT]) scrapMap[UNCAT] = 0;
-        scrapMap[UNCAT] += scrap;
-      }
-    } else {
-      // 无明细才退回 scrap 总量（归未分类）
+    // === 2026-09-03 新松老错存清零 ===
+    // rebuildRawData 给带"老错存 product 字段"的新松 records 打了 __xin_dirty 标记。
+    // 这条 record 的 scrap_reasons 是老 parseXLSXData 时期误识别的明细列（如"取样/未改进/板材变形/划伤"），
+    // 与当前真实数据不符。视为无明细，整条报废量归到「未分类」。
+    if (r.__xin_dirty) {
       if (scrap > 0) {
         if (!scrapMap[UNCAT]) scrapMap[UNCAT] = 0;
         scrapMap[UNCAT] += scrap;
+      }
+      return;
+    }
+    // === v6.5 (2026-09-03): 饼图严格等于透视表 X-AJ 累加 ===
+    // 所有 records 的 scrap_reasons 都按原值累加，不缩放、不补 L
+    // 这样饼图总量严格 = 透视表 "X-AJ 总计" 行；未分类兜底会引入偏移，已移除
+    if (r.scrap_reasons && Object.keys(r.scrap_reasons).length > 0) {
+      for (var k2 in r.scrap_reasons) {
+        var v = num(r.scrap_reasons[k2]);
+        if (v > 0) {
+          var nk = normKey(k2);
+          if (!scrapMap[nk]) scrapMap[nk] = 0;
+          scrapMap[nk] += v;
+        }
       }
     }
   });
@@ -5310,10 +5561,16 @@ function openProductScrapFilter() {
   data.forEach(function(r) {
     if (!isProdTime(r.status)) return;
     var line = r.line || '未分类';
-    var p = r.product || r.pc || '';
+    var pnRaw = r.product || r.pc || '';
+    var p = String(pnRaw).trim().toUpperCase();
     if (!p) return;
+    // v5: 老错存兜底归一（即使 rebuildRawData 漏修也不出长描述）
+    if (/[一-鿿\/]/.test(p) && p.length >= 6) {
+      var rec = extractShortProductCode(pnRaw);
+      if (rec) p = rec;
+    }
     if (!byLine[line]) byLine[line] = {};
-    if (!byLine[line][p]) byLine[line][p] = { total: 0, scrap: 0 };
+    if (!byLine[line][p]) byLine[line][p] = { total: 0, scrap: 0, label: pnRaw };
     byLine[line][p].total += num(r.total);
     byLine[line][p].scrap += num(r.scrap);
   });
@@ -5444,8 +5701,17 @@ function renderProductScrapChart(data) {
     var pnRaw = r.product || r.pc || '';
     var pn = String(pnRaw).trim().toUpperCase();
     if (!pn) return;
+    // === 2026-09-03 老错存兜底归一（即使 rebuildRawData 漏修也不出长描述）===
+    // 新松老 IndexedDB 数据里 product 字段被错存为 pc 长描述（"小米-KUN30-顶盖横梁-V3凸起"），
+    // rebuildRawData 已经会尝试覆盖，但兜底保险——即使没覆盖，聚合时也尝试抽短码归一。
+    if (/[一-鿿\/]/.test(pn) && pn.length >= 6) {
+      var recoveredPn = extractShortProductCode(pnRaw);
+      if (recoveredPn) pn = recoveredPn;
+    }
     if (!byLine[line]) byLine[line] = {};
-    if (!byLine[line][pn]) byLine[line][pn] = { scrap: 0, total: 0, label: pnRaw };
+    // v5: label 也用抽短码后的（让柱图 Y 轴不再显示长描述）
+    var labelText = recoveredPn || pnRaw;
+    if (!byLine[line][pn]) byLine[line][pn] = { scrap: 0, total: 0, label: labelText, _origLabel: pnRaw };
     byLine[line][pn].scrap += num(r.scrap);
     byLine[line][pn].total += num(r.total);
   });
@@ -9185,9 +9451,13 @@ function parseXLSXData(arrayBuffer, filename) {
     // 焊接类（souring 系列）— 补充 8 个常见焊接缺陷
     var scrapReasonNamesWeld = ['未熔合', '错边量', '表面气孔', '气孔', '裂纹', '裂缝', '焊瘤', '飞溅', '其他', '咬边', '烧穿', '夹渣'];
     var allScrapReasonNames = scrapReasonNames.concat(scrapReasonNamesWeld);
+    // 2026-09-03 修复：同一 xlsx 列不能被多个候选名重复抢占。
+    // 例：候选 '取样' 模糊匹配到『取样/断焊』列 → 该列被同时读成 '取样/断焊' 与 '取样' 两个键、
+    //     值相同 → ALIAS 归一后求和翻倍。用 takenCols 保证「一列一键」，按列表顺序前者优先。
+    var takenCols = {};
     allScrapReasonNames.forEach(function(name) {
       var ci = findCol(name);
-      if (ci >= 0) scrapReasonCols[name] = ci;
+      if (ci >= 0 && !takenCols[ci]) { scrapReasonCols[name] = ci; takenCols[ci] = name; }
     });
 
     for (var r = headerRow + 1; r < jsonData.length; r++) {
@@ -9478,10 +9748,13 @@ function parseXLSXData(arrayBuffer, filename) {
   // 真正的报废数（L>0）填在"实际生产时间"行。两个相邻行属于同一班次，
   // X-AJ 是该班的"分类明细"。dashboard 必须按 (日期+班次) 把 X-AJ 汇总到产出行上，
   // 否则饼图看到的"未分类 100%"——因为 getCurrentScrapList 只看产出行 L，X-AJ 在非产出行被跳过。
+  // 2026-09-03 二次修复：必须同时清空非产出行的 scrap_reasons，
+  // 否则 g.allXaj 累加了非产出行 X-AJ + 饼图又累加非产出行原始 scrap_reasons → 重复计数。
   try {
     var byKey = {};
     records.forEach(function(r) {
       var k = (r.sd || r.date || '') + '|' + (r.shift || '') + '|' + (r.line || '');
+      // v6.5b (2026-09-03): 可能出现多隔的非产出行共用同一产出的分类明细
       if (!byKey[k]) byKey[k] = { prod: [], allXaj: {}, totalL: 0 };
       var g = byKey[k];
       if (typeof isProdTime === 'function' && isProdTime(r.status)) {
@@ -9522,9 +9795,42 @@ function parseXLSXData(arrayBuffer, filename) {
         reassignedKeys++;
         for (var kkk in newReasons) reassignedTotal += newReasons[kkk];
       });
+      // v6.5b (2026-09-03): 清空该组非产出行的 scrap_reasons，避免饼图双重计数
+      // 关键场景：souring3 数据里"无计划生产/计划停机"行也填了 X-AJ，
+      // 这些行的 scrap_reasons 会被累加到 g.allXaj（被搬到产出行），
+      // 但如果不清空，饼图又会再累加一次这些行的原始 scrap_reasons。
+      g.prod.forEach(function(p) { p.__xaj_cleared = true; });
+      Object.keys(byKey).forEach(function(kk2) {
+        if (kk2 !== k) return;
+        // 同 key 内的非产出行已经被外层 records.forEach 处理过；
+        // 这里需要再遍历一遍 records 找非产出行（避免对其他组副作用）。
+        // 简化：直接遍历 records 一次找出该组非产出行。
+      });
+      // 直接遍历该组非产出行（g.prod 是产出行，剩余 records 是非产出行）
+      // 用一个临时集合记录已被清空的 records，避免重复
+      g.prod.forEach(function(p) {
+        if (!p._isProdCleared) p._isProdCleared = true;
+      });
+
+    });
+    // 二次扫描：清空所有 records 中属于 byKey 已分配组的非产出行 scrap_reasons
+    Object.keys(byKey).forEach(function(k) {
+      var g = byKey[k];
+      if (g.prod.length === 0) return;
+      if (Object.keys(g.allXaj).length === 0) return;
+      // 遍历 records 找该组（k = sd|shift|line）的非产出行
+      records.forEach(function(r) {
+        var rk = (r.sd || r.date || '') + '|' + (r.shift || '') + '|' + (r.line || '');
+        if (rk !== k) return;
+        if (typeof isProdTime === 'function' && isProdTime(r.status)) return;  // 跳过产出行
+        if (r.scrap_reasons && Object.keys(r.scrap_reasons).length > 0) {
+          // 非产出行 X-AJ 已搬到产出行，清空避免双重计数
+          r.scrap_reasons = undefined;
+        }
+      });
     });
     if (reassignedKeys > 0) {
-      console.log('[xaj-group-merge] 按 (日期+班次) 把 X-AJ 重新分摊到 ' + reassignedKeys + ' 条产出行（累加 ' + reassignedTotal.toFixed(1) + ' 片）');
+      console.log('[xaj-group-merge v6.5b] 按 (日期+班次) 把 X-AJ 重新分摊到 ' + reassignedKeys + ' 条产出行（累加 ' + reassignedTotal.toFixed(1) + ' 片），同时清空非产出行 scrap_reasons 避免双重计数');
     }
   } catch(eMerge) { try { console.warn('[xaj-group-merge]', eMerge); } catch(ev){} }
 
