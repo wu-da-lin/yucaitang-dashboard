@@ -2339,34 +2339,59 @@ function buildDataJS() {
     + 'window.__EXTERNAL_DATA__ = true;\n'
     + 'window.RAW_DATA = \n' + JSON.stringify(RAW_DATA, null, 2) + ';\n';
 }
+// === 稳健 GitHub 同步（修复 409 Conflict）===
+// 旧逻辑：GET 拿 sha，若 GET 返回 404 就 PUT 不带 sha → 已存在文件更新必须带 sha → 409。
+// 新逻辑：GET 取 sha（优先用 ETag，免下载 22MB）；PUT 遇 409 自动重取 sha 重试一次。
+function ghGetSha(token, path) {
+  return fetch(githubApiUrl(path), { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' } })
+    .then(function(r){
+      if (r.status === 404) return null;            // 文件不存在 → 创建
+      if (!r.ok) throw new Error('获取文件信息失败 HTTP ' + r.status);
+      var etag = r.headers.get('ETag') || '';
+      etag = etag.replace(/^W\//,'').replace(/"/g,'');
+      if (etag) return etag;                         // ETag 即 blob sha
+      return r.json().then(function(j){ return j.sha || null; });
+    });
+}
+function ghPutFile(token, path, content, sha) {
+  var body = {
+    message: 'sync: update ' + path + ' @ ' + GITHUB_BRANCH + ' ' + new Date().toISOString().slice(0,19),
+    content: content,
+    branch: GITHUB_BRANCH
+  };
+  if (sha) body.sha = sha;  // 已存在必须带 sha；不存在则不带（创建）
+  return fetch(githubApiUrl(path), {
+    method: 'PUT',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function(r){
+    if (r.ok) return r.json();
+    return r.text().then(function(txt){
+      var msg = '上传失败 HTTP ' + r.status;
+      try { var d = JSON.parse(txt); if (d && d.message) msg = d.message; } catch(e){}
+      var err = new Error(msg); err.status = r.status; throw err;
+    });
+  });
+}
 function syncToGitHub() {
   var token = getSyncToken();
   if (!token) { setSyncToken(); token = getSyncToken(); }
   if (!token) { alert('未设置 Token，无法同步。点「⚙️ 同步设置」粘贴 Token。'); return; }
   var infoEl = document.getElementById('refreshInfo');
   if (infoEl) infoEl.textContent = '正在同步数据到线上...';
-  var apiUrl = githubApiUrl('production_data.js');
-  fetch(apiUrl, { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(function(r){
-      if (r.status === 404) return null;          // 远端无此文件，直接新建
-      if (!r.ok) throw new Error('获取文件失败 HTTP '+r.status);
-      return r.json();
-    })
-    .then(function(meta){
-      var content = btoa(unescape(encodeURIComponent(buildDataJS())));
-      var body = {
-        message: 'sync: update production_data.js (' + RAW_DATA.length + ' records) @ ' + GITHUB_BRANCH,
-        content: content,
-        branch: GITHUB_BRANCH
-      };
-      if (meta && meta.sha) body.sha = meta.sha;
-      return fetch(apiUrl, {
-        method: 'PUT',
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+  var content = btoa(unescape(encodeURIComponent(buildDataJS())));
+  ghGetSha(token, 'production_data.js')
+    .then(function(sha){
+      return ghPutFile(token, 'production_data.js', content, sha).catch(function(err){
+        if (err.status === 409) {
+          if (infoEl) infoEl.textContent = '检测到版本冲突，正在自动重试...';
+          return ghGetSha(token, 'production_data.js').then(function(sha2){
+            return ghPutFile(token, 'production_data.js', content, sha2);
+          });
+        }
+        throw err;
       });
     })
-    .then(function(r){ if(!r.ok) throw new Error('上传失败 HTTP '+r.status); return r.json(); })
     .then(function(){
       if (infoEl) infoEl.textContent = '✅ 数据已同步 (' + RAW_DATA.length + '条) · 同事刷新即见';
       alert('数据同步成功！同事刷新页面（Ctrl+Shift+R）即可看到最新数据。');
@@ -2377,10 +2402,13 @@ function syncToGitHub() {
       var is403 = /403/.test(String(e.message));
       var extra = is403
         ? '\n\n【重点排查 403】\n你的 Token 能读取但无权写入。请重新生成 Token 并确保：\n• Fine-grained PAT：授权 yucaitang-dashboard 仓库，Contents: Read and Write\n• Classic PAT：勾选 repo（完整仓库读写）\n• Token 未过期、未被撤销\n\n改完 Token 后点「⚙️ 同步设置」重新粘贴，再试。'
-        : '\n\n可能原因：\n① Token 无权限（需 Contents: Read & Write）\n② 仓库分支不对（当前配置：' + GITHUB_BRANCH + '）\n③ 公司网封锁 api.github.com / 网络异常';
+        : ((/409/.test(String(e.message)))
+            ? '\n\n仍冲突：请稍等几秒后重试（可能有人同时在点同步）。若持续 409，去 GitHub 仓库网页手动覆盖 production_data.js。'
+            : '\n\n可能原因：\n① Token 无权限（需 Contents: Read & Write）\n② 仓库分支不对（当前配置：' + GITHUB_BRANCH + '）\n③ 公司网封锁 api.github.com / 网络异常');
       alert('数据同步失败：' + e.message + extra + '\n\n退路：点「💾 保存数据」下载文件，再到 GitHub 仓库覆盖 production_data.js。');
     });
 }
+
 
 // 🆕 2026-08-30 同步 HTML 界面到 GitHub：弹出文件选择器，让用户选本地最新 index.html → 自动推送到 GitHub
 function syncUiFromFile() {
@@ -2413,28 +2441,19 @@ function pushHtmlTextToGitHub(htmlText, fileLabel) {
   var token = getSyncToken();
   var infoEl = document.getElementById('refreshInfo');
   if (infoEl) infoEl.textContent = '正在同步界面到线上...';
-  var apiUrl = githubApiUrl('index.html');
-  fetch(apiUrl, { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(function(r){
-      if (r.status === 404) return null;
-      if (!r.ok) throw new Error('获取线上 index.html 失败 HTTP ' + r.status);
-      return r.json();
-    })
-    .then(function(meta){
-      var content = btoa(unescape(encodeURIComponent(htmlText)));
-      var body = {
-        message: 'sync: update index.html (UI changes from ' + (fileLabel || 'local') + ')',
-        content: content,
-        branch: GITHUB_BRANCH
-      };
-      if (meta && meta.sha) body.sha = meta.sha;
-      return fetch(apiUrl, {
-        method: 'PUT',
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+  var content = btoa(unescape(encodeURIComponent(htmlText)));
+  ghGetSha(token, 'index.html')
+    .then(function(sha){
+      return ghPutFile(token, 'index.html', content, sha).catch(function(err){
+        if (err.status === 409) {
+          if (infoEl) infoEl.textContent = '检测到版本冲突，正在自动重试...';
+          return ghGetSha(token, 'index.html').then(function(sha2){
+            return ghPutFile(token, 'index.html', content, sha2);
+          });
+        }
+        throw err;
       });
     })
-    .then(function(r){ if(!r.ok) throw new Error('上传失败 HTTP '+r.status); return r.json(); })
     .then(function(){
       if (infoEl) infoEl.textContent = '✅ 界面已同步到线上 · 1-2 分钟后同事刷新即见';
       alert('界面同步成功！约 1-2 分钟后同事 Ctrl+Shift+R 强刷即可看到最新界面。\n\n注：自己当前页面也要 Ctrl+Shift+R 才能看到（这次同步的是别人下次访问时的版本）。');
@@ -2445,10 +2464,13 @@ function pushHtmlTextToGitHub(htmlText, fileLabel) {
       var is403 = /403/.test(String(e.message));
       var extra = is403
         ? '\n\n【重点排查 403】\n你的 Token 能读取但无权写入。请重新生成 Token 并确保：\n• Fine-grained PAT：授权 yucaitang-dashboard 仓库，Contents: Read and Write\n• Classic PAT：勾选 repo（完整仓库读写）\n• Token 未过期、未被撤销\n\n改完 Token 后点「⚙️ 同步设置」重新粘贴，再试。'
-        : '\n\n可能原因：\n① Token 无权限\n② 仓库分支不对（当前配置：' + GITHUB_BRANCH + '）\n③ 公司网封锁 api.github.com / 网络异常';
+        : ((/409/.test(String(e.message)))
+            ? '\n\n仍冲突：请稍等几秒后重试。若持续 409，去 GitHub 仓库网页手动覆盖 index.html。'
+            : '\n\n可能原因：\n① Token 无权限\n② 仓库分支不对（当前配置：' + GITHUB_BRANCH + '）\n③ 公司网封锁 api.github.com / 网络异常');
       alert('界面同步失败：' + e.message + extra + '\n\n退路：直接去 GitHub 仓库网页上传覆盖 index.html。');
     });
 }
+
 
 function initDataStore() {
   // 🆕 外部数据优先（部署到 GitHub Pages 时）：若页面通过 production_data.js 注入数据，
