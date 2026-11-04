@@ -1876,7 +1876,15 @@ var WORK_TIME_STATUSES = [
   '实际生产时间', '质量相关时间', '故障中断时间',
   '辅助时间（生产）', '辅助时间（工艺）', '辅助时间（供应链）'
 ];
-var PROD_STATUSES = ['实际生产时间'];
+// 🆕 2026-11-04 v2 口径修正（用户 Excel 对齐）：
+//   「无计划生产」= 员工在非计划时间做的加班补产。
+//   ✅ 数量口径：产出 / OK / 报废 / 判退 全部并入实际生产（否则 souring1 10月少 309 片）。
+//   ❌ 时间口径：OEE 三率只认「实际生产时间」。加班那 27688 min 既不进时间动率分子，
+//      也不进负载分母；否则 performance = 10248/(10275+27688) = 27%，OEE 被稀释到 24.9%。
+//   即「产出合并、时间不合并」，与用户 Excel 及跨产线月度对比模块的严格口径一致。
+var PROD_STATUSES = ['实际生产时间', '无计划生产'];
+var OEE_TIME_STATUS = '实际生产时间';   // OEE 时间分子唯一认可的状态
+function isOeeProdTime(s) { return s === OEE_TIME_STATUS; }
 var SAMPLE_STATUS = '样品生产';
 var DOWNTIME_STATUSES = ['计划停机时间', '故障中断时间'];
 
@@ -4036,9 +4044,10 @@ function calcKPIs(data) {
     var min = effMin(r);
     var st = r.status;
     if (isWorkTime(st)) workTimeMin += min;
-    // 实际生产时间 → 用于计算 OEE 三率（actualProdMin / theoryTimeMin）
+    // OEE 时间分子只认「实际生产时间」：无计划生产的加班分钟不进 actualProdMin，
+    // 否则性能动率被 27688 min 稀释（10248/37963 ≈ 27%），OEE 掉到 24.9%。
+    if (isOeeProdTime(st)) actualProdMin += min;
     if (isProdTime(st)) {
-      actualProdMin += min;
       // 理论加工时间：优先用 Excel 中已算好的整批「理论加工时间」列（Σ = CT×total），
       //   缺失时再 fallback 用 uc × total。避免把「理论加工时间」列误作为单片 CT 导致再 * total 一次。
       var tDirect = num(r.tt);
@@ -5537,8 +5546,8 @@ function renderOeeChart(data) {
     if (!byDate[d]) byDate[d] = { actualProdMin: 0, workTimeMin: 0, theoryTimeMin: 0, total: 0, ok: 0 };
     var min = effMin(r);
     if (isWorkTime(r.status)) byDate[d].workTimeMin += min;
+    if (isOeeProdTime(r.status)) byDate[d].actualProdMin += min;
     if (isProdTime(r.status)) {
-      byDate[d].actualProdMin += min;
       // 优先用 r.tt（Excel 已算好的整批理论时间），缺时再算 uc × total
       var tD = num(r.tt);
       byDate[d].theoryTimeMin += tD > 0 ? tD : num(r.uc) * num(r.total);
@@ -11240,8 +11249,9 @@ function crossAggregateLineMonth(line, month) {
     // status 归一化：数据源用全角括号（），统一转半角后比较
     var s = (r.status || '').trim().replace(/（/g, '(').replace(/）/g, ')');
     var am = r.am || 0;
-    if (s === '实际生产时间') {
-      agg.actualMin += am;
+    if (s === '实际生产时间' || s === '无计划生产') {
+      // v2 口径：加班补产的「数量」并入实际生产；「时间」只进 noPlanMin，不进 OEE 分子
+      if (s === '实际生产时间') agg.actualMin += am; else agg.noPlanMin += am;
       agg.total   += (r.total || 0);
       agg.ok      += (r.ok || 0);
       agg.scrap   += (r.scrap || 0);
@@ -11260,7 +11270,6 @@ function crossAggregateLineMonth(line, month) {
     else if (s === '样品生产')              agg.sampleMin    += am;
     else if (s === '计划性保养')            agg.pmMin        += am;
     else if (s.indexOf('工装切换') === 0)      agg.toolChangeMin+= am;
-    else if (s === '无计划生产')            agg.noPlanMin    += am;
     else if (s === '计划停机时间')          agg.planMin      += am;
   }
   // 负载时间口径与主看板 LOAD_STATUSES 一致：实际生产 + 质量相关 + 故障中断 + 辅助(生产/工艺/供应链)
